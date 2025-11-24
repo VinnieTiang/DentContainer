@@ -1,0 +1,4 @@
+conda activate rgbd-opencv
+python main.py -> choose 4
+python render_rgbd.py
+streamlit run simple_dataset_viewer.py
