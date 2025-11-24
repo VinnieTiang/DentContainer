@@ -115,10 +115,14 @@ class ContainerConfig:
     # Color probabilities for random selection
     COLOR_PROBABILITIES = [0.20, 0.20, 0.15, 0.10, 0.15, 0.10, 0.05, 0.05]
     
-    # Structural parameters
-    WALL_THICKNESS = 0.002
-    FLOOR_THICKNESS = 0.028
-    DOOR_THICKNESS = 0.050
+    # Structural parameters - ISO standard thicknesses (in meters)
+    SIDE_WALL_THICKNESS = 0.0016  # 1.6mm - Corten steel side panels
+    ROOF_THICKNESS = 0.002         # 2.0mm - Roof panels for additional strength
+    DOOR_THICKNESS = 0.002         # 2.0mm - Front door panels (was incorrectly 50mm)
+    BACK_WALL_THICKNESS = 0.002    # 2.0mm - Back wall panels
+    FLOOR_THICKNESS = 0.028        # 28mm - Plywood floor panels
+    # Legacy parameter for backward compatibility (used for general wall thickness)
+    WALL_THICKNESS = 0.0016        # Default to side wall thickness
     
     # Corrugation parameters
     CORRUGATION_DEPTH = 0.025
@@ -203,8 +207,11 @@ class ShippingContainerGenerator:
         
         logger.info("Creating structural details...")
         meshes.extend(self._create_side_rails(ext_l, ext_w, ext_h))
-        meshes.extend(self._create_roof_cross_members(ext_l, ext_w, ext_h))
+        # Roof cross members removed - no horizontal poles on roof
         meshes.extend(self._create_floor_cross_members(ext_l, ext_w))
+        
+        logger.info("Adding roof-to-side connection details...")
+        meshes.extend(self._create_roof_side_connections(ext_l, ext_w, ext_h))
         
         logger.info("Adding back wall structural frame...")
         meshes.extend(self._create_back_wall_frame(ext_w, ext_h, -ext_l / 2))
@@ -218,8 +225,8 @@ class ShippingContainerGenerator:
         logger.info("Adding forklift pockets...")
         meshes.extend(self._create_forklift_pockets(ext_l, ext_w))
         
-        logger.info("Adding interior tie-down points...")
-        meshes.extend(self._create_interior_tie_downs(ext_l, ext_w, ext_h))
+        # Interior tie-down points removed - no dots on floor panel
+        # meshes.extend(self._create_interior_tie_downs(ext_l, ext_w, ext_h))
         
         # Combine meshes
         logger.info("Combining meshes...")
@@ -250,18 +257,28 @@ class ShippingContainerGenerator:
     def _create_corrugated_panel(self, dim_a: float, dim_b: float, *,
                                  normal: Tuple[int, int, int],
                                  offset: Tuple[float, float, float],
-                                 shallow: bool = False) -> trimesh.Trimesh:
-        """Create corrugated panel with trapezoidal profile."""
+                                 shallow: bool = False,
+                                 thickness: float = None) -> trimesh.Trimesh:
+        """Create corrugated panel with trapezoidal profile.
+        
+        Args:
+            dim_a: First dimension (corrugation direction)
+            dim_b: Second dimension (extrusion direction)
+            normal: Panel normal vector
+            offset: Panel position offset
+            shallow: Whether to use shallow corrugation
+            thickness: Panel thickness in meters (uses WALL_THICKNESS if None)
+        """
         
         if not SHAPELY_AVAILABLE:
             # Fallback to simple sinusoidal corrugation
-            return self._create_corrugated_panel_simple(dim_a, dim_b, normal, offset, shallow)
+            return self._create_corrugated_panel_simple(dim_a, dim_b, normal, offset, shallow, thickness)
         
         # Increase number of corrugations for higher detail
         na = max(1, int(dim_a / self.config.CORRUGATION_PITCH))
         pitch = dim_a / na
         depth = self.config.CORRUGATION_DEPTH * (0.4 if shallow else 1.0)
-        wall_t = self.config.WALL_THICKNESS
+        wall_t = thickness if thickness is not None else self.config.WALL_THICKNESS
         
         # Generate trapezoidal profile with more subdivision points
         crest_ratio, valley_ratio = 0.35, 0.35
@@ -348,10 +365,12 @@ class ShippingContainerGenerator:
     def _create_corrugated_panel_simple(self, dim_a: float, dim_b: float,
                                        normal: Tuple[int, int, int],
                                        offset: Tuple[float, float, float],
-                                       shallow: bool = False) -> trimesh.Trimesh:
+                                       shallow: bool = False,
+                                       thickness: float = None) -> trimesh.Trimesh:
         """Fallback: simple sinusoidal corrugation with high mesh density."""
         num_corrugations = int(dim_a / self.config.CORRUGATION_PITCH)
         depth = self.config.CORRUGATION_DEPTH * (0.4 if shallow else 1.0)
+        wall_t = thickness if thickness is not None else self.config.WALL_THICKNESS
         
         vertices = []
         faces = []
@@ -429,24 +448,62 @@ class ShippingContainerGenerator:
     # Main structural components
     # ------------------------------------------------------------------
     def _create_side_walls(self, length: float, height: float, width: float) -> List[trimesh.Trimesh]:
-        """Create left and right corrugated walls."""
-        offset_z = height / 2
-        left = self._create_corrugated_panel(length, height, normal=(0, 1, 0),
-                                            offset=(0, -width / 2, offset_z))
-        right = self._create_corrugated_panel(length, height, normal=(0, -1, 0),
-                                             offset=(0, width / 2, offset_z))
+        """Create left and right corrugated walls.
+        
+        Side panels are continuously welded to side rails and corner posts.
+        The top edge meets the top side rail where it connects to the roof panel.
+        """
+        # Top rail height (60mm = 0.06m)
+        top_rail_height = 0.06
+        # Side wall extends from floor to top rail (not all the way to roof)
+        # The top rail serves as the connection point
+        wall_height = height - top_rail_height / 2  # Extend to middle of top rail
+        offset_z = wall_height / 2
+        
+        left = self._create_corrugated_panel(length, wall_height, normal=(0, 1, 0),
+                                            offset=(0, -width / 2, offset_z),
+                                            thickness=self.config.SIDE_WALL_THICKNESS)
+        right = self._create_corrugated_panel(length, wall_height, normal=(0, -1, 0),
+                                             offset=(0, width / 2, offset_z),
+                                             thickness=self.config.SIDE_WALL_THICKNESS)
         return [left, right]
     
     def _create_back_wall(self, width: float, height: float, x_pos: float) -> trimesh.Trimesh:
-        """Create back corrugated wall."""
-        offset_z = height / 2
-        return self._create_corrugated_panel(width, height, normal=(-1, 0, 0),
-                                            offset=(x_pos, 0, offset_z))
+        """Create back corrugated wall.
+        
+        Back wall extends to meet the top side rails where it connects to the roof.
+        The top rail serves as the connection point between roof and back wall.
+        """
+        top_rail_height = 0.06  # 60mm rails
+        # Back wall extends to meet the top rail (similar to side walls)
+        wall_height = height - top_rail_height / 2
+        offset_z = wall_height / 2
+        return self._create_corrugated_panel(width, wall_height, normal=(-1, 0, 0),
+                                            offset=(x_pos, 0, offset_z),
+                                            thickness=self.config.BACK_WALL_THICKNESS)
     
     def _create_roof(self, length: float, width: float, height: float) -> trimesh.Trimesh:
-        """Create corrugated roof with slight arch for drainage."""
-        roof = self._create_corrugated_panel(width, length, normal=(0, 0, 1),
-                                            offset=(0, 0, height), shallow=True)
+        """Create corrugated roof with slight arch for drainage.
+        
+        Roof panels are welded to top side rails and front/rear headers.
+        The roof sits on top of the top side rails, creating a proper edge connection.
+        """
+        # Top rail height (60mm = 0.06m)
+        top_rail_height = 0.06
+        # Roof panel sits on top of the rails
+        # Adjust width to account for rails, roof extends slightly over rails for proper connection
+        roof_width = width  # Full width, will overlap rails slightly
+        roof_z_position = height - top_rail_height / 2  # Sit on top of rails
+        
+        # Horizontal corrugation: swap dimensions so corrugation runs along length (horizontal)
+        roof = self._create_corrugated_panel(length, roof_width, normal=(0, 0, 1),
+                                            offset=(0, 0, roof_z_position), shallow=True,
+                                            thickness=self.config.ROOF_THICKNESS)
+        
+        # Rotate roof panel 90 degrees around Z-axis so corrugation runs horizontally (across width)
+        # This ensures the corrugation runs perpendicular to the container length
+        rotation_z = trimesh.transformations.rotation_matrix(np.pi / 2, [0, 0, 1])
+        roof.apply_transform(rotation_z)
         
         # Add slight arch for water drainage (center is slightly higher)
         vertices = roof.vertices.copy()
@@ -484,10 +541,13 @@ class ShippingContainerGenerator:
     
     def _create_floor(self, length: float, width: float) -> trimesh.Trimesh:
         """Create corrugated floor base (dark brown)."""
+        # Floor uses plywood thickness, not steel panel thickness
+        # The corrugated panel represents the steel base, but actual floor thickness is plywood
         floor_panel = self._create_corrugated_panel(
             width, length, normal=(0, 0, -1),
             offset=(0, 0, self.config.FLOOR_THICKNESS / 2),
-            shallow=True
+            shallow=True,
+            thickness=0.002  # Steel base layer under plywood
         )
         dark_brown_rgba = (80, 50, 20, 255)
         return _colored(floor_panel, dark_brown_rgba)
@@ -563,14 +623,17 @@ class ShippingContainerGenerator:
         return castings
     
     def _create_side_rails(self, length: float, width: float, height: float) -> List[trimesh.Trimesh]:
-        """Create top and bottom side rails."""
-        rail_t = 0.08
-        rail_color = (100, 100, 100, 255)
+        """Create top and bottom side rails (ISO standard: 60x60mm square steel pipes)."""
+        # ISO standard top side rail: 60x60mm square steel pipe (0.06m x 0.06m)
+        rail_t = 0.06  # 60mm square rails
+        rail_color = (90, 90, 95, 255)  # Dark metallic gray for structural rails
         rails = []
         
-        # Top rails
+        # Top rails - positioned at the top edge where roof and side panels meet
+        # These serve as the connection point between roof and side panels
         for y in (-width / 2 + rail_t / 2, width / 2 - rail_t / 2):
             rail = _box((length, rail_t, rail_t), color=rail_color)
+            # Position rail so top edge aligns with container height
             rail.apply_translation((0, y, height - rail_t / 2))
             rails.append(rail)
         
@@ -581,6 +644,62 @@ class ShippingContainerGenerator:
             rails.append(rail)
         
         return rails
+    
+    def _create_roof_side_connections(self, length: float, width: float, height: float) -> List[trimesh.Trimesh]:
+        """Create connection details where roof panels meet side panels at top side rails.
+        
+        In real containers, roof panels are continuously welded to top side rails.
+        This method adds visual details to represent the welded connection.
+        """
+        parts = []
+        top_rail_height = 0.06  # 60mm rails
+        rail_t = top_rail_height
+        
+        # Welding seam color - slightly darker/metallic to represent welded joint
+        weld_color = (70, 70, 75, 255)  # Dark metallic gray for welding seams
+        weld_width = 0.005  # 5mm weld bead width
+        weld_height = 0.002  # 2mm weld bead height
+        
+        # Create welding seams along top rails where roof meets side panels
+        # These represent continuous welding along the connection
+        for y_side in (-1, 1):
+            y_pos = y_side * (width / 2 - rail_t / 2)
+            
+            # Welding seam along the top edge of the rail (where roof sits)
+            # This represents the continuous weld between roof panel and top rail
+            weld_seam = _box((length, weld_width, weld_height), color=weld_color)
+            weld_seam.apply_translation((0, y_pos, height - rail_t / 2 + weld_height / 2))
+            parts.append(weld_seam)
+            
+            # Additional connection detail: small reinforcement at corners
+            # These represent reinforcement plates at corner castings
+            corner_reinforcement_size = 0.08
+            corner_reinforcement_thickness = 0.003
+            
+            for x_side in (-1, 1):
+                x_pos = x_side * (length / 2 - corner_reinforcement_size / 2)
+                # Small reinforcement plate at corner
+                corner_plate = _box((corner_reinforcement_size, corner_reinforcement_thickness, 
+                                     corner_reinforcement_size), color=weld_color)
+                corner_plate.apply_translation((x_pos, y_pos, height - rail_t / 2))
+                parts.append(corner_plate)
+        
+        # Front and rear headers (where roof meets front/back walls)
+        # These are part of the end frames but ensure proper roof connection
+        header_t = 0.10  # Header thickness (from end frame)
+        header_color = (90, 90, 95, 255)
+        
+        # Front header (at door end)
+        front_header = _box((header_t, width, rail_t), color=header_color)
+        front_header.apply_translation((length / 2 - header_t / 2, 0, height - rail_t / 2))
+        parts.append(front_header)
+        
+        # Rear header (at back wall)
+        rear_header = _box((header_t, width, rail_t), color=header_color)
+        rear_header.apply_translation((-length / 2 + header_t / 2, 0, height - rail_t / 2))
+        parts.append(rear_header)
+        
+        return parts
     
     def _create_roof_cross_members(self, length: float, width: float, height: float) -> List[trimesh.Trimesh]:
         """Create roof structural cross members."""
@@ -617,26 +736,27 @@ class ShippingContainerGenerator:
     def _create_back_wall_frame(self, width: float, height: float, x_pos: float) -> List[trimesh.Trimesh]:
         """Create structural frame for back wall with vertical posts, horizontal bars, and L-brackets."""
         parts = []
-        frame_color = (120, 120, 120, 255)  # Light gray for frame
-        post_radius = 0.04  # Radius of vertical posts
+        # Hard metal color - darker metallic gray for structural posts
+        frame_color = (80, 80, 85, 255)  # Dark metallic gray for hard metal
+        post_size = 0.08  # Size of cuboid posts (was radius, now full dimension)
         bar_radius = 0.03   # Radius of horizontal bars
         bracket_size = 0.06  # Size of L-shaped brackets
         floor_z = self.config.FLOOR_THICKNESS
         wall_thickness = self.config.WALL_THICKNESS
         
         # Position frame slightly forward from back wall (on interior side)
-        frame_x = x_pos + wall_thickness + post_radius
+        frame_x = x_pos + wall_thickness + post_size / 2
         
-        # Vertical posts at corners (cylindrical)
+        # Vertical posts at corners (cuboid/box shape for hard metal appearance)
         for y_side in (-1, 1):
-            y_pos = y_side * (width / 2 - post_radius)
-            # Full height post
-            post = _cylinder(post_radius, height - floor_z, sections=16, color=frame_color)
+            y_pos = y_side * (width / 2 - post_size / 2)
+            # Full height post - cuboid shape instead of cylinder
+            post = _box((post_size, post_size, height - floor_z), color=frame_color)
             post.apply_translation((frame_x, y_pos, floor_z + (height - floor_z) / 2))
             parts.append(post)
         
         # Horizontal bars at top and bottom
-        bar_length = width - 2 * post_radius
+        bar_length = width - 2 * (post_size / 2)
         
         # Top horizontal bar
         top_bar = _cylinder(bar_radius, bar_length, sections=16, color=frame_color)
@@ -653,11 +773,11 @@ class ShippingContainerGenerator:
         parts.append(bottom_bar)
         
         # L-shaped brackets connecting bars to posts
-        bracket_color = (100, 100, 100, 255)  # Slightly darker
+        bracket_color = (70, 70, 75, 255)  # Darker metallic for brackets
         bracket_thickness = 0.015
         
         for y_side in (-1, 1):
-            y_pos = y_side * (width / 2 - post_radius)
+            y_pos = y_side * (width / 2 - post_size / 2)
             
             # Top bracket - L-shaped (vertical arm + horizontal arm)
             # Vertical arm (along post)
@@ -721,7 +841,8 @@ class ShippingContainerGenerator:
                 dim_a=door_panel_w, dim_b=door_panel_h,
                 normal=(1, 0, 0),
                 offset=(door_x_pos, door_center_y, door_panel_center_z),
-                shallow=False
+                shallow=False,
+                thickness=self.config.DOOR_THICKNESS
             )
             
             # Apply rotation to open door slightly around vertical hinge axis (Z-axis)
