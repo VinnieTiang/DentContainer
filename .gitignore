@@ -105,7 +105,23 @@ Thumbs.db
 # *.ply
 # *.npy
 
-# Data files (uncomment if generated data should be ignored)
-# complete_containers_dented/
-# panel_dents/
 
+# 3D models / large files
+complete_containers/
+complete_containers_dented/
+panel/
+panel_dents/
+*.obj
+*.fbx
+*.stl
+*.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs / outputs
+*.log
+output/
+output_scene/
+temp_undented/
