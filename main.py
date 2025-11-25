@@ -662,7 +662,7 @@ def print_menu():
     print("4. Render RGB-D Images")
     print("5. Generate Complete Shipping Container")
     print("6. Add Dents to Complete Containers")
-    print("7. Render Container Scenes (PyTorch3D)")
+    print("7. Render Container Scenes (PyRender)")
     print("0. Exit")
     print("="*50)
 

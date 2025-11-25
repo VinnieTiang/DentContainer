@@ -22,6 +22,8 @@ import cv2
 from typing import Optional, Tuple, Dict
 import logging
 from datetime import datetime
+import subprocess
+import sys
 
 from config import ContainerConfig, RendererConfig
 from camera_position import CameraPoseGenerator
@@ -220,11 +222,14 @@ class DentComparisonRenderer:
         logger.info(f"  Original: {len(original_mesh.vertices)} vertices, {len(original_mesh.faces)} faces")
         logger.info(f"  Dented: {len(dented_mesh.vertices)} vertices, {len(dented_mesh.faces)} faces")
         
+        # Load dent metadata from JSON file
+        dent_metadata = self._load_dent_metadata(dented_path)
+        
         # Generate camera poses
         poses = self.pose_generator.generate_poses(container_type)
         logger.info(f"Generated {len(poses)} camera poses")
         
-        # Process each camera pose
+        # Process each camera pose - Collect statistics and save summary JSON
         results = []
         base_name = original_path.stem.replace("_dented", "").replace("container_", "")
         
@@ -240,7 +245,7 @@ class DentComparisonRenderer:
                 # Compare depths
                 depth_diff, dent_mask = self.compare_depths(original_depth, dented_depth, threshold)
                 
-                # Render RGB for visualization (optional)
+                # Render RGB for saving (needed for visual output generation later)
                 original_rgb, _ = self._render_rgb(original_mesh, pose)
                 dented_rgb, _ = self._render_rgb(dented_mesh, pose)
                 
@@ -295,11 +300,28 @@ class DentComparisonRenderer:
                 total_pixels = dent_mask.size
                 dent_percentage = (dent_pixels / total_pixels) * 100 if total_pixels > 0 else 0
                 
-                max_diff = np.max(depth_diff[depth_diff > 0]) if np.any(depth_diff > 0) else 0
+                # Calculate max depth difference while ignoring outliers (using 99th percentile)
+                max_diff = self._calculate_max_depth_diff_robust(depth_diff, percentile=99.0)
                 mean_diff = np.mean(depth_diff[depth_diff > threshold]) if np.any(depth_diff > threshold) else 0
                 
                 logger.info(f"    ✓ Dent mask: {dent_pixels} pixels ({dent_percentage:.1f}%)")
                 logger.info(f"    ✓ Max depth difference: {max_diff*1000:.2f}mm, Mean: {mean_diff*1000:.2f}mm")
+                
+                # Calculate camera distance from panel
+                # For regular shots: distance from camera to panel
+                # For corner shots: distance from panel towards corner pole
+                camera_distance_m = self._calculate_camera_distance(pose)
+                
+                # Calculate dent area in cm² from mask pixels
+                # Count pixels where mask = 1 (dented pixels) and convert to real-world area
+                dent_area_cm2 = self._calculate_dent_area(dent_mask, dented_depth)
+                
+                # Calculate dent depth in mm
+                # First try to get from metadata, fallback to calculation
+                dent_depth_mm = self._extract_dent_depth_from_metadata(dent_metadata)
+                if dent_depth_mm == 0.0:
+                    # Fallback to calculation if metadata not available
+                    dent_depth_mm = self._calculate_dent_depth(depth_diff, dent_mask)
                 
                 results.append({
                     'shot_name': shot_name,
@@ -310,6 +332,10 @@ class DentComparisonRenderer:
                     'max_depth_diff_mm': float(max_diff * 1000),
                     'mean_depth_diff_m': float(mean_diff),
                     'mean_depth_diff_mm': float(mean_diff * 1000),
+                    'dent_area_cm2': float(dent_area_cm2),
+                    'dent_depth_mm': float(dent_depth_mm),
+                    'camera_distance_m': float(camera_distance_m),
+                    'camera_distance_cm': float(camera_distance_m * 100),
                     'output_dir': str(shot_output_dir)
                 })
                 
@@ -317,7 +343,7 @@ class DentComparisonRenderer:
                 logger.error(f"    ✗ Error processing shot {shot_name}: {e}", exc_info=True)
                 continue
         
-        # Save summary
+        # Save summary JSON first
         summary = {
             'original_file': str(original_path),
             'dented_file': str(dented_path),
@@ -334,7 +360,55 @@ class DentComparisonRenderer:
         
         logger.info(f"✓ Comparison complete. Summary saved to: {summary_path}")
         
+        # Automatically generate visual outputs
+        self._generate_visual_outputs(summary_path)
+        
         return summary
+    
+    def _generate_visual_outputs(self, summary_path: Path) -> None:
+        """
+        Automatically run the visual output generation script after summary JSON is created.
+        
+        Args:
+            summary_path: Path to the comparison summary JSON file
+        """
+        try:
+            # Get the path to the visual output script (same directory as this script)
+            script_dir = Path(__file__).parent
+            visual_output_script = script_dir / "compare_dents_depth_visual_output.py"
+            
+            if not visual_output_script.exists():
+                logger.warning(f"Visual output script not found: {visual_output_script}")
+                logger.warning("Skipping visual output generation")
+                return
+            
+            logger.info("Generating visual overlay images...")
+            
+            # Run the visual output script
+            result = subprocess.run(
+                [sys.executable, str(visual_output_script), "--summary", str(summary_path)],
+                capture_output=True,
+                text=True,
+                cwd=str(script_dir)
+            )
+            
+            if result.returncode == 0:
+                logger.info("✓ Visual overlay images generated successfully")
+                if result.stdout:
+                    # Log any output from the script
+                    for line in result.stdout.strip().split('\n'):
+                        if line.strip():
+                            logger.info(f"  {line}")
+            else:
+                logger.error(f"✗ Visual output generation failed with return code {result.returncode}")
+                if result.stderr:
+                    logger.error(f"Error output: {result.stderr}")
+                if result.stdout:
+                    logger.error(f"Standard output: {result.stdout}")
+        
+        except Exception as e:
+            logger.error(f"✗ Error generating visual outputs: {e}", exc_info=True)
+            logger.warning("Continuing without visual outputs...")
     
     def _render_rgb(self, mesh: trimesh.Trimesh, pose: Dict) -> Tuple[np.ndarray, np.ndarray]:
         """Render RGB image for visualization."""
@@ -472,6 +546,241 @@ class DentComparisonRenderer:
         
         normalized[depth <= 0] = 0
         return normalized
+    
+    def _load_dent_metadata(self, dented_path: Path) -> Optional[Dict]:
+        """
+        Load dent metadata from JSON file corresponding to the dented container OBJ file.
+        
+        Args:
+            dented_path: Path to dented container OBJ file
+            
+        Returns:
+            Dictionary with dent metadata or None if file not found
+        """
+        # Try to find corresponding JSON file
+        json_path = dented_path.with_suffix('.json')
+        
+        if not json_path.exists():
+            logger.warning(f"Dent metadata JSON not found: {json_path}")
+            return None
+        
+        try:
+            with open(json_path, 'r') as f:
+                metadata = json.load(f)
+            logger.info(f"Loaded dent metadata from: {json_path}")
+            return metadata
+        except Exception as e:
+            logger.warning(f"Failed to load dent metadata from {json_path}: {e}")
+            return None
+    
+    def _extract_dent_area_from_metadata(self, dent_metadata: Optional[Dict]) -> float:
+        """
+        Extract total dent area in cm² from metadata.
+        
+        Args:
+            dent_metadata: Dictionary with dent metadata
+            
+        Returns:
+            Total dent area in cm²
+        """
+        if not dent_metadata or 'dents' not in dent_metadata:
+            return 0.0
+        
+        total_area_m2 = 0.0
+        
+        for dent in dent_metadata['dents']:
+            dent_type = dent.get('type', '')
+            
+            if dent_type == 'elliptical':
+                # Area = π * radius_x * radius_y
+                radius_x = dent.get('radius_x', 0)
+                radius_y = dent.get('radius_y', 0)
+                area = np.pi * radius_x * radius_y
+                total_area_m2 += area
+            elif dent_type == 'corner':
+                # Area = π * radius²
+                radius = dent.get('radius', 0)
+                area = np.pi * radius * radius
+                total_area_m2 += area
+            elif dent_type == 'crease':
+                # Area = length * width
+                length = dent.get('length', 0)
+                width = dent.get('width', 0)
+                area = length * width
+                total_area_m2 += area
+            elif dent_type == 'circular':
+                # Area = π * radius²
+                radius = dent.get('radius', 0)
+                area = np.pi * radius * radius
+                total_area_m2 += area
+        
+        # Convert to cm²
+        total_area_cm2 = total_area_m2 * 10000.0
+        return total_area_cm2
+    
+    def _extract_dent_depth_from_metadata(self, dent_metadata: Optional[Dict]) -> float:
+        """
+        Extract maximum dent depth in mm from metadata.
+        
+        Args:
+            dent_metadata: Dictionary with dent metadata
+            
+        Returns:
+            Maximum dent depth in mm
+        """
+        if not dent_metadata or 'dents' not in dent_metadata:
+            return 0.0
+        
+        max_depth_mm = 0.0
+        
+        for dent in dent_metadata['dents']:
+            # Prefer depth_mm if available, otherwise convert depth (meters) to mm
+            depth_mm = dent.get('depth_mm', 0)
+            if depth_mm == 0:
+                depth_m = dent.get('depth', 0)
+                depth_mm = depth_m * 1000.0
+            
+            max_depth_mm = max(max_depth_mm, depth_mm)
+        
+        return max_depth_mm
+    
+    def _calculate_camera_distance(self, pose: Dict) -> float:
+        """
+        Calculate camera distance from the panel or corner pole.
+        
+        For regular shots: distance from camera (eye) to panel (at)
+        For corner shots: distance from camera (eye) to corner pole (at)
+        
+        Args:
+            pose: Camera pose dictionary with 'eye' and 'at' keys
+            
+        Returns:
+            Distance in meters
+        """
+        # Convert pose to numpy arrays
+        eye = pose['eye'].cpu().numpy()[0] if hasattr(pose['eye'], 'cpu') else np.asarray(pose['eye'])
+        at = pose['at'].cpu().numpy()[0] if hasattr(pose['at'], 'cpu') else np.asarray(pose['at'])
+        
+        # Ensure 1D arrays
+        if eye.ndim > 1:
+            eye = eye.flatten()
+        if at.ndim > 1:
+            at = at.flatten()
+        
+        # Calculate Euclidean distance from camera to target
+        distance = np.linalg.norm(eye - at)
+        
+        return float(distance)
+    
+    def _calculate_dent_area(self, dent_mask: np.ndarray, depth_map: np.ndarray) -> float:
+        """
+        Calculate dent area in cm² by counting pixels where mask = 1 (dented) 
+        and converting pixel count to real-world area using depth information.
+        
+        Args:
+            dent_mask: Binary mask (H, W) where WHITE (255) = dented areas (mask = 1)
+            depth_map: Depth map (H, W) in meters
+            
+        Returns:
+            Dent area in cm²
+        """
+        h, w = dent_mask.shape
+        # Count pixels where mask = 1 (dented pixels, represented as 255 in the mask)
+        dent_pixels = (dent_mask > 0)  # Count all non-zero pixels (mask = 1 means dented)
+        
+        if not np.any(dent_pixels):
+            return 0.0
+        
+        # Calculate camera intrinsics from FOV
+        fov_y_rad = np.deg2rad(self.camera_fov)
+        focal_length = (h / 2.0) / np.tan(fov_y_rad / 2.0)
+        
+        # For square images, aspect ratio is 1:1
+        fov_x_rad = fov_y_rad
+        
+        # Calculate pixel size in world coordinates for each dent pixel
+        # pixel_width = 2 * depth * tan(fov_x/2) / image_width
+        # pixel_height = 2 * depth * tan(fov_y/2) / image_height
+        # pixel_area = pixel_width * pixel_height
+        
+        # Get depths for dent pixels
+        dent_depths = depth_map[dent_pixels]
+        valid_depths = dent_depths[dent_depths > 0]
+        
+        if len(valid_depths) == 0:
+            return 0.0
+        
+        # Calculate average depth for dent region
+        avg_depth = np.mean(valid_depths)
+        
+        # Calculate pixel dimensions in meters at average depth
+        pixel_width_m = 2 * avg_depth * np.tan(fov_x_rad / 2.0) / w
+        pixel_height_m = 2 * avg_depth * np.tan(fov_y_rad / 2.0) / h
+        pixel_area_m2 = pixel_width_m * pixel_height_m
+        
+        # Calculate total area
+        num_dent_pixels = np.sum(dent_pixels)
+        total_area_m2 = num_dent_pixels * pixel_area_m2
+        
+        # Convert to cm²
+        total_area_cm2 = total_area_m2 * 10000.0
+        
+        return total_area_cm2
+    
+    def _calculate_max_depth_diff_robust(self, depth_diff: np.ndarray, percentile: float = 99.0) -> float:
+        """
+        Calculate maximum depth difference while ignoring outliers.
+        
+        Uses percentile-based approach to filter out extreme outliers.
+        
+        Args:
+            depth_diff: Depth difference map (H, W) in meters
+            percentile: Percentile to use for max calculation (default: 99.0, meaning 99th percentile)
+            
+        Returns:
+            Maximum depth difference in meters (ignoring outliers)
+        """
+        # Get all valid depth differences (positive and finite)
+        valid_depths = depth_diff[(depth_diff > 0) & np.isfinite(depth_diff)]
+        
+        if len(valid_depths) == 0:
+            return 0.0
+        
+        # Use percentile to ignore outliers (e.g., 99th percentile instead of absolute max)
+        max_depth_m = np.percentile(valid_depths, percentile)
+        
+        return float(max_depth_m)
+    
+    def _calculate_dent_depth(self, depth_diff: np.ndarray, dent_mask: np.ndarray) -> float:
+        """
+        Calculate maximum dent depth in mm.
+        
+        Args:
+            depth_diff: Depth difference map (H, W) in meters
+            dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
+            
+        Returns:
+            Maximum dent depth in mm
+        """
+        dent_pixels = (dent_mask > 127)
+        
+        if not np.any(dent_pixels):
+            return 0.0
+        
+        # Get depth differences for dent pixels
+        dent_depths = depth_diff[dent_pixels]
+        valid_depths = dent_depths[np.isfinite(dent_depths) & (dent_depths > 0)]
+        
+        if len(valid_depths) == 0:
+            return 0.0
+        
+        # Calculate maximum depth difference
+        max_depth_m = np.max(valid_depths)
+        
+        # Convert to mm
+        max_depth_mm = max_depth_m * 1000.0
+        
+        return max_depth_mm
     
     def cleanup(self):
         """Clean up renderer resources."""
