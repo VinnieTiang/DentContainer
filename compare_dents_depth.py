@@ -300,12 +300,32 @@ class DentComparisonRenderer:
                 total_pixels = dent_mask.size
                 dent_percentage = (dent_pixels / total_pixels) * 100 if total_pixels > 0 else 0
                 
-                # Calculate max depth difference while ignoring outliers (using 99th percentile)
-                max_diff = self._calculate_max_depth_diff_robust(depth_diff, percentile=99.0)
-                mean_diff = np.mean(depth_diff[depth_diff > threshold]) if np.any(depth_diff > threshold) else 0
+                # Extract dent-depth values (where mask indicates dents)
+                dent_depth_values = self._extract_dent_depths(depth_diff, dent_mask, threshold)
                 
-                logger.info(f"    ✓ Dent mask: {dent_pixels} pixels ({dent_percentage:.1f}%)")
-                logger.info(f"    ✓ Max depth difference: {max_diff*1000:.2f}mm, Mean: {mean_diff*1000:.2f}mm")
+                # Calculate raw statistics (before filtering)
+                raw_max_diff_m = np.max(dent_depth_values) if len(dent_depth_values) > 0 else 0.0
+                raw_max_diff_mm = raw_max_diff_m * 1000.0
+                
+                # Filter unrealistic dent depths using robust outlier rejection
+                filtered_dent_depths = self._filter_dent_depths_outliers(dent_depth_values)
+                
+                # Calculate filtered statistics (after filtering)
+                filtered_max_diff_m = np.max(filtered_dent_depths) if len(filtered_dent_depths) > 0 else 0.0
+                filtered_max_diff_mm = filtered_max_diff_m * 1000.0
+                
+                # Check if filtered max depth exceeds 200mm threshold
+                # If it does, set output as "unknown" instead of capping
+                if filtered_max_diff_mm > 200.0:
+                    filtered_max_diff_m = "unknown"
+                    filtered_max_diff_mm = "unknown"
+                    logger.info(f"    ✓ Dent mask: {dent_pixels} pixels ({dent_percentage:.1f}%)")
+                    logger.info(f"    ✓ Raw max depth difference: {raw_max_diff_mm:.2f}mm")
+                    logger.info(f"    ✓ Filtered max depth difference: unknown (exceeds 200mm threshold)")
+                else:
+                    logger.info(f"    ✓ Dent mask: {dent_pixels} pixels ({dent_percentage:.1f}%)")
+                    logger.info(f"    ✓ Raw max depth difference: {raw_max_diff_mm:.2f}mm")
+                    logger.info(f"    ✓ Filtered max depth difference: {filtered_max_diff_mm:.2f}mm")
                 
                 # Calculate camera distance from panel
                 # For regular shots: distance from camera to panel
@@ -316,24 +336,22 @@ class DentComparisonRenderer:
                 # Count pixels where mask = 1 (dented pixels) and convert to real-world area
                 dent_area_cm2 = self._calculate_dent_area(dent_mask, dented_depth)
                 
-                # Calculate dent depth in mm
-                # First try to get from metadata, fallback to calculation
-                dent_depth_mm = self._extract_dent_depth_from_metadata(dent_metadata)
-                if dent_depth_mm == 0.0:
-                    # Fallback to calculation if metadata not available
-                    dent_depth_mm = self._calculate_dent_depth(depth_diff, dent_mask)
+                # Prepare filtered statistics for JSON (handle "unknown" case)
+                filtered_max_diff_m_json = filtered_max_diff_m if filtered_max_diff_m == "unknown" else float(filtered_max_diff_m)
+                filtered_max_diff_mm_json = filtered_max_diff_mm if filtered_max_diff_mm == "unknown" else float(filtered_max_diff_mm)
                 
                 results.append({
                     'shot_name': shot_name,
                     'dent_pixels': int(dent_pixels),
                     'total_pixels': int(total_pixels),
                     'dent_percentage': float(dent_percentage),
-                    'max_depth_diff_m': float(max_diff),
-                    'max_depth_diff_mm': float(max_diff * 1000),
-                    'mean_depth_diff_m': float(mean_diff),
-                    'mean_depth_diff_mm': float(mean_diff * 1000),
+                    # Raw statistics (before filtering)
+                    'max_depth_diff_m_raw': float(raw_max_diff_m),
+                    'max_depth_diff_mm_raw': float(raw_max_diff_mm),
+                    # Filtered statistics (after outlier removal, set to "unknown" if exceeds 200mm)
+                    'max_depth_diff_m': filtered_max_diff_m_json,
+                    'max_depth_diff_mm': filtered_max_diff_mm_json,
                     'dent_area_cm2': float(dent_area_cm2),
-                    'dent_depth_mm': float(dent_depth_mm),
                     'camera_distance_m': float(camera_distance_m),
                     'camera_distance_cm': float(camera_distance_m * 100),
                     'output_dir': str(shot_output_dir)
@@ -726,6 +744,78 @@ class DentComparisonRenderer:
         total_area_cm2 = total_area_m2 * 10000.0
         
         return total_area_cm2
+    
+    def _extract_dent_depths(self, depth_diff: np.ndarray, dent_mask: np.ndarray, threshold: float = 0.01) -> np.ndarray:
+        """
+        Extract depth difference values for pixels identified as dents.
+        
+        Args:
+            depth_diff: Depth difference map (H, W) in meters
+            dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
+            threshold: Minimum depth difference threshold in meters
+            
+        Returns:
+            Array of dent depth values in meters (1D array)
+        """
+        # Get pixels where mask indicates dents (white pixels)
+        dent_pixels = (dent_mask > 0)
+        
+        if not np.any(dent_pixels):
+            return np.array([])
+        
+        # Extract depth differences for dent pixels
+        dent_depths = depth_diff[dent_pixels]
+        
+        # Filter to valid, finite, positive values above threshold
+        valid_depths = dent_depths[
+            np.isfinite(dent_depths) & 
+            (dent_depths > 0) & 
+            (dent_depths > threshold)
+        ]
+        
+        return valid_depths
+    
+    def _filter_dent_depths_outliers(self, dent_depths: np.ndarray, 
+                                     method: str = 'percentile',
+                                     percentile: float = 99.0,
+                                     iqr_multiplier: float = 1.5) -> np.ndarray:
+        """
+        Filter unrealistic dent depths using robust outlier rejection.
+        
+        Supports two methods:
+        1. Percentile clipping: clip values above the specified percentile
+        2. IQR filtering: remove values > Q3 + multiplier * IQR
+        
+        Args:
+            dent_depths: Array of dent depth values in meters
+            method: 'percentile' or 'iqr'
+            percentile: Percentile to clip at (for percentile method)
+            iqr_multiplier: Multiplier for IQR method (default: 1.5)
+            
+        Returns:
+            Filtered array of dent depth values in meters
+        """
+        if len(dent_depths) == 0:
+            return dent_depths
+        
+        if method == 'percentile':
+            # Percentile clipping: clip above specified percentile
+            clip_value = np.percentile(dent_depths, percentile)
+            filtered = dent_depths[dent_depths <= clip_value]
+            return filtered
+        
+        elif method == 'iqr':
+            # IQR filtering: remove values > Q3 + multiplier * IQR
+            q1 = np.percentile(dent_depths, 25.0)
+            q3 = np.percentile(dent_depths, 75.0)
+            iqr = q3 - q1
+            upper_bound = q3 + iqr_multiplier * iqr
+            filtered = dent_depths[dent_depths <= upper_bound]
+            return filtered
+        
+        else:
+            logger.warning(f"Unknown filtering method: {method}. Using percentile method.")
+            return self._filter_dent_depths_outliers(dent_depths, method='percentile', percentile=percentile)
     
     def _calculate_max_depth_diff_robust(self, depth_diff: np.ndarray, percentile: float = 99.0) -> float:
         """
