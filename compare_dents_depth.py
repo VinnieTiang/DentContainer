@@ -24,6 +24,8 @@ import logging
 from datetime import datetime
 import subprocess
 import sys
+from sklearn.linear_model import RANSACRegressor
+from scipy.ndimage import gaussian_filter
 
 from config import ContainerConfig, RendererConfig
 from camera_position import CameraPoseGenerator
@@ -186,6 +188,257 @@ class DentComparisonRenderer:
         
         return depth_diff, binary_mask
     
+    def _depth_to_points_camera_space(self, depth: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Convert depth map to 3D points in camera space.
+        
+        Args:
+            depth: Depth map (H, W) in meters
+            
+        Returns:
+            Tuple of (points_3d, valid_mask)
+            - points_3d: Nx3 array of 3D points in camera space (x, y, z)
+            - valid_mask: Boolean mask indicating valid pixels (H, W)
+        """
+        height, width = depth.shape
+        
+        # Calculate camera intrinsics from FOV
+        fov_y_rad = np.deg2rad(self.camera_fov)
+        focal_length = (height / 2.0) / np.tan(fov_y_rad / 2.0)
+        cx, cy = width / 2.0, height / 2.0
+        
+        # Create pixel coordinates
+        u, v = np.meshgrid(np.arange(width), np.arange(height))
+        
+        # Convert to normalized camera coordinates
+        x_norm = (u - cx) / focal_length
+        y_norm = (v - cy) / focal_length
+        
+        # Get valid depth pixels (non-zero and finite)
+        valid_mask = (depth > 0) & np.isfinite(depth)
+        
+        # Back-project to 3D points in camera space
+        x_cam = x_norm[valid_mask] * depth[valid_mask]
+        y_cam = y_norm[valid_mask] * depth[valid_mask]
+        z_cam = depth[valid_mask]
+        
+        # Stack into Nx3 array
+        points_cam = np.stack([x_cam, y_cam, z_cam], axis=1)
+        
+        return points_cam, valid_mask
+    
+    def _fit_plane_ransac(self, points: np.ndarray, 
+                         residual_threshold: float = 0.01,
+                         max_trials: int = 1000,
+                         min_samples: int = 3) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Fit a plane to 3D points using RANSAC.
+        
+        Args:
+            points: Nx3 array of 3D points
+            residual_threshold: Maximum distance from a point to the plane to be considered an inlier (meters)
+            max_trials: Maximum number of RANSAC iterations
+            min_samples: Minimum number of samples to fit a plane
+            
+        Returns:
+            Tuple of (inlier_mask, plane_coefficients)
+            - inlier_mask: Boolean array indicating inlier points
+            - plane_coefficients: [a, b, c, d] where ax + by + cz + d = 0
+        """
+        if len(points) < min_samples:
+            logger.warning(f"Not enough points for RANSAC: {len(points)} < {min_samples}")
+            return np.zeros(len(points), dtype=bool), np.array([0, 0, 1, 0])
+        
+        # Use sklearn's RANSACRegressor for plane fitting
+        # We'll fit z as a function of x and y: z = ax + by + c
+        # This is equivalent to fitting the plane ax + by - z + c = 0
+        
+        X = points[:, :2]  # x, y coordinates
+        y = points[:, 2]    # z coordinates
+        
+        # Create RANSAC regressor
+        ransac = RANSACRegressor(
+            residual_threshold=residual_threshold,
+            max_trials=max_trials,
+            min_samples=min_samples,
+            random_state=42
+        )
+        
+        try:
+            ransac.fit(X, y)
+            inlier_mask = ransac.inlier_mask_
+            
+            # Get plane coefficients: z = ax + by + c
+            # Convert to plane equation: ax + by - z + c = 0
+            # So plane_coefficients = [a, b, -1, c]
+            a, b = ransac.estimator_.coef_
+            c = ransac.estimator_.intercept_
+            plane_coefficients = np.array([a, b, -1.0, c])
+            
+            logger.info(f"RANSAC plane fitting: {np.sum(inlier_mask)}/{len(points)} inliers "
+                       f"({100*np.sum(inlier_mask)/len(points):.1f}%)")
+            
+            return inlier_mask, plane_coefficients
+            
+        except Exception as e:
+            logger.warning(f"RANSAC fitting failed: {e}. Using all points as inliers.")
+            return np.ones(len(points), dtype=bool), np.array([0, 0, -1, 0])
+    
+    def _calculate_adaptive_sigma(self, depth: np.ndarray, 
+                                  min_sigma: float = 3.0, 
+                                  max_sigma: float = 12.0,
+                                  base_sigma: float = 6.0) -> float:
+        """
+        Calculate adaptive sigma for Gaussian smoothing based on depth variance.
+        
+        Higher variance indicates more corrugation/variation, requiring more smoothing.
+        Lower variance indicates flatter surfaces, requiring less smoothing.
+        
+        Args:
+            depth: Depth map (H, W) in meters
+            min_sigma: Minimum sigma value (default: 3.0)
+            max_sigma: Maximum sigma value (default: 12.0)
+            base_sigma: Base sigma value for normalization (default: 6.0)
+            
+        Returns:
+            Adaptive sigma value for Gaussian smoothing
+        """
+        # Get valid depth pixels
+        valid_mask = (depth > 0) & np.isfinite(depth)
+        
+        if not np.any(valid_mask):
+            return base_sigma
+        
+        valid_depths = depth[valid_mask]
+        
+        # Calculate depth variance
+        depth_variance = np.var(valid_depths)
+        depth_std = np.std(valid_depths)
+        
+        # Calculate mean depth for normalization
+        depth_mean = np.mean(valid_depths)
+        
+        # Normalize variance by mean depth to get relative variation
+        # This accounts for different camera distances
+        relative_variance = depth_variance / (depth_mean ** 2 + 1e-6)
+        relative_std = depth_std / (depth_mean + 1e-6)
+        
+        # Scale sigma based on relative standard deviation
+        # Higher relative std = more corrugation = higher sigma needed
+        # Use a scaling factor: sigma = base_sigma * (1 + relative_std * scale_factor)
+        scale_factor = 2.0  # Adjust this to control sensitivity
+        adaptive_sigma = base_sigma * (1.0 + relative_std * scale_factor)
+        
+        # Clamp to min/max bounds
+        adaptive_sigma = np.clip(adaptive_sigma, min_sigma, max_sigma)
+        
+        logger.info(f"    Depth variance: {depth_variance:.6f}, relative std: {relative_std:.4f}, "
+                   f"adaptive sigma: {adaptive_sigma:.2f}")
+        
+        return float(adaptive_sigma)
+    
+    def _apply_gaussian_smoothing(self, depth: np.ndarray, sigma: Optional[float] = None, 
+                                 adaptive: bool = True) -> Tuple[np.ndarray, float]:
+        """
+        Apply Gaussian smoothing to depth map to flatten corrugation patterns.
+        
+        Args:
+            depth: Depth map (H, W) in meters
+            sigma: Standard deviation for Gaussian kernel (if None and adaptive=True, will be calculated)
+            adaptive: If True, automatically tune sigma based on depth variance
+            
+        Returns:
+            Tuple of (smoothed_depth_map, sigma_used)
+        """
+        # Calculate adaptive sigma if requested
+        if adaptive and sigma is None:
+            sigma = self._calculate_adaptive_sigma(depth)
+        elif sigma is None:
+            sigma = 6.0  # Default fallback
+        
+        # Only smooth valid depth pixels (non-zero and finite)
+        valid_mask = (depth > 0) & np.isfinite(depth)
+        
+        if not np.any(valid_mask):
+            return depth.copy(), sigma
+        
+        # Create a copy and apply Gaussian filter
+        smoothed_depth = depth.copy()
+        
+        # Apply Gaussian filter to valid regions
+        # Use gaussian_filter which handles NaN/inf gracefully by only filtering valid pixels
+        smoothed = gaussian_filter(depth, sigma=sigma, mode='constant', cval=0.0)
+        
+        # Preserve invalid pixels (set smoothed invalid pixels back to original)
+        smoothed_depth[valid_mask] = smoothed[valid_mask]
+        smoothed_depth[~valid_mask] = depth[~valid_mask]
+        
+        return smoothed_depth, sigma
+    
+    def _generate_panel_mask_ransac(self, depth: np.ndarray,
+                                   residual_threshold: float = 0.01,
+                                   max_trials: int = 1000) -> np.ndarray:
+        """
+        Generate a binary panel mask using RANSAC plane fitting.
+        
+        Applies RANSAC to detect the main container panel surface and creates a binary mask
+        from the inliers (pixels belonging to the main panel).
+        
+        Args:
+            depth: Depth map (H, W) in meters
+            residual_threshold: Maximum distance from plane to be considered an inlier (meters)
+            max_trials: Maximum number of RANSAC iterations
+            
+        Returns:
+            Binary mask (H, W) where True/255 = panel pixels (inliers), False/0 = other pixels (outliers)
+        """
+        # Convert depth map to 3D points
+        points_3d, valid_mask = self._depth_to_points_camera_space(depth)
+        
+        if len(points_3d) == 0:
+            logger.warning("No valid points found in depth map for RANSAC")
+            return np.zeros_like(depth, dtype=np.uint8)
+        
+        # Apply RANSAC plane fitting
+        inlier_mask_points, _ = self._fit_plane_ransac(
+            points_3d, 
+            residual_threshold=residual_threshold,
+            max_trials=max_trials
+        )
+        
+        # Create binary mask image from inlier mask (0 or 1 for multiplication)
+        panel_mask = np.zeros_like(depth, dtype=np.float32)
+        
+        # Map inlier points back to image coordinates
+        valid_indices = np.where(valid_mask)
+        inlier_indices = np.where(inlier_mask_points)[0]
+        
+        # Create mapping from point index to pixel coordinates
+        if len(inlier_indices) > 0:
+            # Get pixel coordinates for inlier points
+            inlier_pixels = (valid_indices[0][inlier_indices], valid_indices[1][inlier_indices])
+            panel_mask[inlier_pixels] = 1.0  # 1.0 for panel pixels (for multiplication)
+        
+        logger.info(f"Panel mask: {np.sum(panel_mask > 0)}/{panel_mask.size} pixels "
+                   f"({100*np.sum(panel_mask > 0)/panel_mask.size:.1f}%)")
+        
+        return panel_mask
+    
+    def _apply_mask_to_depth(self, depth: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """
+        Apply binary mask to depth map using multiplication.
+        
+        Args:
+            depth: Depth map (H, W) in meters
+            mask: Binary mask (H, W) where 1.0 = keep, 0.0 = remove
+            
+        Returns:
+            Masked depth map (H, W) where non-masked pixels are set to 0
+        """
+        # Use multiplication: masked_depth = depth * mask
+        masked_depth = depth * mask
+        return masked_depth
+    
     def process_container_pair(self, original_path: Path, dented_path: Path, 
                               output_dir: Path, container_type: str = "20ft",
                               threshold: float = 0.01) -> Dict:
@@ -242,8 +495,26 @@ class DentComparisonRenderer:
                 original_depth = self.render_depth(original_mesh, pose)
                 dented_depth = self.render_depth(dented_mesh, pose)
                 
-                # Compare depths
-                depth_diff, dent_mask = self.compare_depths(original_depth, dented_depth, threshold)
+                # Apply Gaussian smoothing to flatten corrugation pattern before RANSAC
+                # Automatically tune sigma based on depth variance
+                logger.info(f"    Applying Gaussian smoothing with adaptive sigma to flatten corrugation pattern...")
+                original_depth_smoothed, sigma_used = self._apply_gaussian_smoothing(original_depth, adaptive=True)
+                logger.info(f"    Using sigma={sigma_used:.2f} for Gaussian smoothing")
+                
+                # Apply RANSAC plane fitting to detect main panel surface (using smoothed original depth map)
+                logger.info(f"    Applying RANSAC plane fitting to detect main panel surface...")
+                panel_mask = self._generate_panel_mask_ransac(
+                    original_depth_smoothed,
+                    residual_threshold=0.01,  # 1cm threshold for inliers
+                    max_trials=1000
+                )
+                
+                # Apply panel mask to both original (unsmoothed) depth maps for accurate dent measurement
+                original_depth_masked = self._apply_mask_to_depth(original_depth, panel_mask)
+                dented_depth_masked = self._apply_mask_to_depth(dented_depth, panel_mask)
+                
+                # Compare depths using masked depth maps
+                depth_diff, dent_mask = self.compare_depths(original_depth_masked, dented_depth_masked, threshold)
                 
                 # Render RGB for saving (needed for visual output generation later)
                 original_rgb, _ = self._render_rgb(original_mesh, pose)
@@ -253,19 +524,43 @@ class DentComparisonRenderer:
                 shot_output_dir = output_dir / shot_name
                 shot_output_dir.mkdir(parents=True, exist_ok=True)
                 
-                # Save depth maps
+                # Save masked depth maps (after RANSAC panel detection)
                 original_depth_path = shot_output_dir / f"{base_name}_original_depth.npy"
                 dented_depth_path = shot_output_dir / f"{base_name}_dented_depth.npy"
-                np.save(original_depth_path, original_depth.astype(np.float32))
-                np.save(dented_depth_path, dented_depth.astype(np.float32))
+                np.save(original_depth_path, original_depth_masked.astype(np.float32))
+                np.save(dented_depth_path, dented_depth_masked.astype(np.float32))
+                
+                # Save panel mask from RANSAC
+                panel_mask_path = shot_output_dir / f"{base_name}_panel_mask.npy"
+                np.save(panel_mask_path, panel_mask.astype(np.float32))  # Save as float (0 or 1)
+                # Convert to uint8 (0 or 255) for PNG visualization
+                panel_mask_uint8 = (panel_mask * 255).astype(np.uint8)
+                imageio.imwrite(shot_output_dir / f"{base_name}_panel_mask.png", panel_mask_uint8)
+                
+                # Save debug visualization images for panel extraction pipeline
+                logger.info(f"    Saving debug visualization images...")
+                # 1. Original depth (unsmoothed)
+                original_depth_img_debug = self._normalize_depth(original_depth)
+                imageio.imwrite(shot_output_dir / f"{base_name}_debug_original_depth.png", original_depth_img_debug)
+                
+                # 2. Smoothed depth (used for RANSAC)
+                smoothed_depth_img = self._normalize_depth(original_depth_smoothed)
+                imageio.imwrite(shot_output_dir / f"{base_name}_debug_smoothed_depth.png", smoothed_depth_img)
+                
+                # 3. RANSAC panel mask (already saved above, but add debug prefix for clarity)
+                imageio.imwrite(shot_output_dir / f"{base_name}_debug_panel_mask.png", panel_mask_uint8)
+                
+                # 4. Final masked depth (original unsmoothed depth with mask applied)
+                masked_depth_img = self._normalize_depth(original_depth_masked)
+                imageio.imwrite(shot_output_dir / f"{base_name}_debug_masked_depth.png", masked_depth_img)
                 
                 # Save depth difference
                 depth_diff_path = shot_output_dir / f"{base_name}_depth_diff.npy"
                 np.save(depth_diff_path, depth_diff.astype(np.float32))
                 
-                # Save normalized depth images for visualization
-                original_depth_img = self._normalize_depth(original_depth)
-                dented_depth_img = self._normalize_depth(dented_depth)
+                # Save normalized depth images for visualization (using masked depth maps)
+                original_depth_img = self._normalize_depth(original_depth_masked)
+                dented_depth_img = self._normalize_depth(dented_depth_masked)
                 depth_diff_img = self._normalize_depth(depth_diff)
                 
                 imageio.imwrite(shot_output_dir / f"{base_name}_original_depth.png", original_depth_img)
@@ -276,16 +571,16 @@ class DentComparisonRenderer:
                 imageio.imwrite(shot_output_dir / f"{base_name}_original_rgb.png", original_rgb)
                 imageio.imwrite(shot_output_dir / f"{base_name}_dented_rgb.png", dented_rgb)
                 
-                # Generate and save point clouds as PLY files
+                # Generate and save point clouds as PLY files (using masked depth maps)
                 try:
                     # Original point cloud with RGB colors
-                    original_pcd = self._depth_to_pointcloud(original_depth, pose, original_rgb)
+                    original_pcd = self._depth_to_pointcloud(original_depth_masked, pose, original_rgb)
                     original_ply_path = shot_output_dir / f"{base_name}_original_pointcloud.ply"
                     original_pcd.export(original_ply_path)
                     logger.info(f"    ✓ Saved original point cloud: {original_ply_path.name} ({len(original_pcd.vertices)} points)")
                     
                     # Dented point cloud with RGB colors
-                    dented_pcd = self._depth_to_pointcloud(dented_depth, pose, dented_rgb)
+                    dented_pcd = self._depth_to_pointcloud(dented_depth_masked, pose, dented_rgb)
                     dented_ply_path = shot_output_dir / f"{base_name}_dented_pointcloud.ply"
                     dented_pcd.export(dented_ply_path)
                     logger.info(f"    ✓ Saved dented point cloud: {dented_ply_path.name} ({len(dented_pcd.vertices)} points)")
@@ -315,13 +610,13 @@ class DentComparisonRenderer:
                 filtered_max_diff_mm = filtered_max_diff_m * 1000.0
                 
                 # Check if filtered max depth exceeds 200mm threshold
-                # If it does, set output as "unknown" instead of capping
+                # If it does, use the raw detected depth instead of the filtered value
                 if filtered_max_diff_mm > 200.0:
-                    filtered_max_diff_m = "unknown"
-                    filtered_max_diff_mm = "unknown"
+                    filtered_max_diff_m = raw_max_diff_m
+                    filtered_max_diff_mm = raw_max_diff_mm
                     logger.info(f"    ✓ Dent mask: {dent_pixels} pixels ({dent_percentage:.1f}%)")
                     logger.info(f"    ✓ Raw max depth difference: {raw_max_diff_mm:.2f}mm")
-                    logger.info(f"    ✓ Filtered max depth difference: unknown (exceeds 200mm threshold)")
+                    logger.info(f"    ✓ Filtered max depth difference: {filtered_max_diff_mm:.2f}mm (using raw value, filtered exceeded 200mm)")
                 else:
                     logger.info(f"    ✓ Dent mask: {dent_pixels} pixels ({dent_percentage:.1f}%)")
                     logger.info(f"    ✓ Raw max depth difference: {raw_max_diff_mm:.2f}mm")
@@ -334,11 +629,8 @@ class DentComparisonRenderer:
                 
                 # Calculate dent area in cm² from mask pixels
                 # Count pixels where mask = 1 (dented pixels) and convert to real-world area
-                dent_area_cm2 = self._calculate_dent_area(dent_mask, dented_depth)
-                
-                # Prepare filtered statistics for JSON (handle "unknown" case)
-                filtered_max_diff_m_json = filtered_max_diff_m if filtered_max_diff_m == "unknown" else float(filtered_max_diff_m)
-                filtered_max_diff_mm_json = filtered_max_diff_mm if filtered_max_diff_mm == "unknown" else float(filtered_max_diff_mm)
+                # Use masked depth map for area calculation
+                dent_area_cm2 = self._calculate_dent_area(dent_mask, dented_depth_masked)
                 
                 results.append({
                     'shot_name': shot_name,
@@ -348,9 +640,9 @@ class DentComparisonRenderer:
                     # Raw statistics (before filtering)
                     'max_depth_diff_m_raw': float(raw_max_diff_m),
                     'max_depth_diff_mm_raw': float(raw_max_diff_mm),
-                    # Filtered statistics (after outlier removal, set to "unknown" if exceeds 200mm)
-                    'max_depth_diff_m': filtered_max_diff_m_json,
-                    'max_depth_diff_mm': filtered_max_diff_mm_json,
+                    # Filtered statistics (after outlier removal, uses raw value if filtered exceeds 200mm)
+                    'max_depth_diff_m': float(filtered_max_diff_m),
+                    'max_depth_diff_mm': float(filtered_max_diff_mm),
                     'dent_area_cm2': float(dent_area_cm2),
                     'camera_distance_m': float(camera_distance_m),
                     'camera_distance_cm': float(camera_distance_m * 100),
