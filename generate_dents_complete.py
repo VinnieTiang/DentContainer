@@ -898,7 +898,7 @@ class DentGenerator:
     
     def add_dent(self, dent_type: str = 'random', 
                  size_range: Tuple[float, float] = (0.08, 0.50),
-                 depth_range: Tuple[float, float] = (0.02, 0.15),
+                 depth_range: Tuple[float, float] = (0.008, 0.06),
                  severity: str = 'normal',
                  **kwargs):
         """
@@ -917,13 +917,13 @@ class DentGenerator:
         # Find realistic location (EXCLUDES FLOOR)
         position, normal = self._find_realistic_dent_location(dent_type)
         
-        # Apply severity multipliers for dramatic damage variety
-        # Aggressive multipliers for serious damage (physics fixes prevent artifacts)
+        # Apply severity multipliers for damage variety
+        # Reduced multipliers for less severe damage
         severity_multipliers = {
-            'light': (0.9, 0.9),      # Slightly smaller
-            'normal': (1.2, 1.3),    # Base level - serious damage
-            'heavy': (1.8, 2.0),     # Large, deep impacts
-            'extreme': (2.5, 2.8)    # Major collisions - very dramatic
+            'light': (0.7, 0.7),      # Smaller, shallower
+            'normal': (0.9, 0.9),     # Base level - moderate damage
+            'heavy': (1.2, 1.3),      # Larger, deeper impacts
+            'extreme': (1.5, 1.6)     # Major collisions - less dramatic
         }
         size_mult, depth_mult = severity_multipliers.get(severity, (1.0, 1.0))
         
@@ -949,8 +949,8 @@ class DentGenerator:
             self._apply_circular_dent(position, normal, size, depth)
         
         elif dent_type == 'elliptical':
-            # Random aspect ratio and rotation - very elongated for serious damage
-            aspect_ratio = random.uniform(2.0, 5.0)  # Very elongated
+            # Random aspect ratio and rotation - elongated for damage
+            aspect_ratio = random.uniform(1.5, 3.5)  # Elongated (reduced from 2.0-5.0)
             radius_x = size * np.sqrt(aspect_ratio)
             radius_y = size / np.sqrt(aspect_ratio)
             angle = random.uniform(0, 2 * np.pi)
@@ -960,16 +960,16 @@ class DentGenerator:
             self._apply_elliptical_dent(position, normal, radius_x, radius_y, depth, angle)
         
         elif dent_type == 'crease':
-            # Crease is elongated - very long creases for serious scraping damage
-            length = size * random.uniform(3.0, 6.0)  # Very long creases
+            # Crease is elongated - long creases for scraping damage
+            length = size * random.uniform(2.0, 4.0)  # Long creases (reduced from 3.0-6.0)
             width = size * random.uniform(0.2, 0.4)   # Narrow but deep
             dent_spec['length'] = length
             dent_spec['width'] = width
             self._apply_crease_dent(position, normal, length, width, depth)
         
         elif dent_type == 'corner':
-            # Corner dents are typically circular but MUCH deeper
-            depth = depth * random.uniform(1.8, 3.0)  # Very deep for corners
+            # Corner dents are typically circular but deeper
+            depth = depth * random.uniform(1.2, 1.8)  # Deeper for corners (reduced from 1.8-3.0)
             dent_spec['radius'] = size
             dent_spec['depth'] = depth  # Update depth after modification
             dent_spec['depth_mm'] = depth * 1000
@@ -977,8 +977,8 @@ class DentGenerator:
         
         elif dent_type == 'surface':
             # Surface dents are wider and varied in depth
-            size = size * random.uniform(1.8, 3.0)  # Much wider
-            depth = depth * random.uniform(0.9, 1.3)  # Varied depth
+            size = size * random.uniform(1.3, 2.0)  # Wider (reduced from 1.8-3.0)
+            depth = depth * random.uniform(0.8, 1.1)  # Varied depth (reduced from 0.9-1.3)
             dent_spec['radius'] = size
             dent_spec['depth'] = depth  # Update depth after modification
             dent_spec['depth_mm'] = depth * 1000
@@ -1057,7 +1057,7 @@ def add_dents_to_container(input_path: str, output_path: str,
                           num_dents: int = 5,
                           dent_type_distribution: Dict[str, float] = None,
                           size_range: Tuple[float, float] = (0.08, 0.50),
-                          depth_range: Tuple[float, float] = (0.02, 0.15),
+                          depth_range: Tuple[float, float] = (0.008, 0.06),
                           varied_severity: bool = True,
                           save_specs: bool = True):
     """
@@ -1070,18 +1070,18 @@ def add_dents_to_container(input_path: str, output_path: str,
     - Smooth Gaussian falloff for realistic material behavior
     - Displacement constraints prevent mesh tearing
     
-    SERIOUS DAMAGE DEFAULTS:
-    - Size: 8-50cm (serious impact zones)
-    - Depth: 2-15cm (deep depressions)
-    - Varied severity creates mix of minor to extreme damage
+    MODERATE DAMAGE DEFAULTS:
+    - Size: 8-50cm (impact zones)
+    - Depth: 8-60mm (moderate depressions, reduced from 2-15cm)
+    - Varied severity creates mix of minor to moderate damage
     
     Args:
         input_path: Path to input container OBJ file
         output_path: Path to save dented container OBJ file
         num_dents: Number of dents to add
         dent_type_distribution: Probability distribution for dent types
-        size_range: (min, max) size in meters (default: 8-50cm for serious damage)
-        depth_range: (min, max) depth in meters (default: 2-15cm for serious damage)
+        size_range: (min, max) size in meters (default: 8-50cm)
+        depth_range: (min, max) depth in meters (default: 8-60mm, reduced from 2-15cm)
         varied_severity: If True, mix light and heavy damage for variety
     """
     logger.info(f"Loading container from {input_path}...")
@@ -1160,22 +1160,22 @@ def batch_process_containers(input_folder: str = "complete_containers",
                             output_folder: str = "complete_containers_dents",
                             num_dents: int = 5,
                             size_range: Tuple[float, float] = (0.08, 0.50),
-                            depth_range: Tuple[float, float] = (0.02, 0.15),
+                            depth_range: Tuple[float, float] = (0.008, 0.06),
                             varied_severity: bool = True):
     """
     Batch process all container OBJ files in a folder with physics-based dents.
     AUTOMATICALLY EXCLUDES FLOOR PANEL from dents.
     
-    SERIOUS DAMAGE DEFAULTS:
-    - Size: 8-50cm (serious impact zones)
-    - Depth: 2-15cm (deep depressions)
+    MODERATE DAMAGE DEFAULTS:
+    - Size: 8-50cm (impact zones)
+    - Depth: 8-60mm (moderate depressions, reduced from 2-15cm)
     
     Args:
         input_folder: Folder containing input container OBJ files
         output_folder: Folder to save dented containers
         num_dents: Number of dents to add per container
-        size_range: (min, max) size in meters (default: 8-50cm for serious damage)
-        depth_range: (min, max) depth in meters (default: 2-15cm for serious damage)
+        size_range: (min, max) size in meters (default: 8-50cm)
+        depth_range: (min, max) depth in meters (default: 8-60mm, reduced from 2-15cm)
         varied_severity: If True, mix light and heavy damage for variety
     """
     input_path = Path(input_folder)
@@ -1278,10 +1278,10 @@ Examples:
                        help='Minimum dent size in meters (default: 0.08 = 8cm for serious damage)')
     parser.add_argument('--max-size', type=float, default=0.50,
                        help='Maximum dent size in meters (default: 0.50 = 50cm for serious damage)')
-    parser.add_argument('--min-depth', type=float, default=0.02,
-                       help='Minimum dent depth in meters (default: 0.02 = 2cm for serious damage)')
-    parser.add_argument('--max-depth', type=float, default=0.15,
-                       help='Maximum dent depth in meters (default: 0.15 = 15cm for serious damage)')
+    parser.add_argument('--min-depth', type=float, default=0.008,
+                       help='Minimum dent depth in meters (default: 0.008 = 8mm, reduced from 2cm)')
+    parser.add_argument('--max-depth', type=float, default=0.06,
+                       help='Maximum dent depth in meters (default: 0.06 = 60mm, reduced from 15cm)')
     parser.add_argument('--no-varied-severity', action='store_true',
                        help='Disable varied severity (all dents will be same intensity)')
     parser.add_argument('--input-folder', type=str, default='complete_containers',

@@ -285,9 +285,9 @@ class DentComparisonRenderer:
             return np.ones(len(points), dtype=bool), np.array([0, 0, -1, 0])
     
     def _calculate_adaptive_sigma(self, depth: np.ndarray, 
-                                  min_sigma: float = 3.0, 
-                                  max_sigma: float = 12.0,
-                                  base_sigma: float = 6.0) -> float:
+                                  min_sigma: float = 4.0, 
+                                  max_sigma: float = 18.0,
+                                  base_sigma: float = 8.0) -> float:
         """
         Calculate adaptive sigma for Gaussian smoothing based on depth variance.
         
@@ -375,8 +375,59 @@ class DentComparisonRenderer:
         
         return smoothed_depth, sigma
     
+    def _calculate_adaptive_residual_threshold(self, depth: np.ndarray,
+                                             base_threshold: float = 0.02,
+                                             min_threshold: float = 0.015,
+                                             max_threshold: float = 0.05) -> float:
+        """
+        Calculate adaptive residual threshold for RANSAC based on corrugation depth.
+        
+        Deeper corrugations require a more lenient threshold to include all panel sections.
+        
+        Args:
+            depth: Depth map (H, W) in meters
+            base_threshold: Base threshold value (default: 0.02m = 2cm)
+            min_threshold: Minimum threshold value (default: 0.015m = 1.5cm)
+            max_threshold: Maximum threshold value (default: 0.05m = 5cm)
+            
+        Returns:
+            Adaptive residual threshold in meters
+        """
+        # Get valid depth pixels
+        valid_mask = (depth > 0) & np.isfinite(depth)
+        
+        if not np.any(valid_mask):
+            return base_threshold
+        
+        valid_depths = depth[valid_mask]
+        
+        # Calculate depth range (corrugation depth)
+        depth_min = np.min(valid_depths)
+        depth_max = np.max(valid_depths)
+        depth_range = depth_max - depth_min
+        
+        # Calculate mean depth for normalization
+        depth_mean = np.mean(valid_depths)
+        
+        # Normalize range by mean depth to get relative corrugation depth
+        relative_range = depth_range / (depth_mean + 1e-6)
+        
+        # Scale threshold based on relative corrugation depth
+        # Higher relative range = deeper corrugations = higher threshold needed
+        scale_factor = 1.5  # Adjust this to control sensitivity
+        adaptive_threshold = base_threshold * (1.0 + relative_range * scale_factor)
+        
+        # Clamp to min/max bounds
+        adaptive_threshold = np.clip(adaptive_threshold, min_threshold, max_threshold)
+        
+        logger.info(f"    Depth range: {depth_range:.4f}m, relative range: {relative_range:.4f}, "
+                   f"adaptive residual threshold: {adaptive_threshold*1000:.1f}mm")
+        
+        return float(adaptive_threshold)
+    
     def _generate_panel_mask_ransac(self, depth: np.ndarray,
-                                   residual_threshold: float = 0.01,
+                                   residual_threshold: Optional[float] = None,
+                                   adaptive_threshold: bool = True,
                                    max_trials: int = 1000) -> np.ndarray:
         """
         Generate a binary panel mask using RANSAC plane fitting.
@@ -387,17 +438,25 @@ class DentComparisonRenderer:
         Args:
             depth: Depth map (H, W) in meters
             residual_threshold: Maximum distance from plane to be considered an inlier (meters)
+                                If None and adaptive_threshold=True, will be calculated adaptively
+            adaptive_threshold: If True, automatically tune residual threshold based on corrugation depth
             max_trials: Maximum number of RANSAC iterations
             
         Returns:
-            Binary mask (H, W) where True/255 = panel pixels (inliers), False/0 = other pixels (outliers)
+            Binary mask (H, W) where True/1.0 = panel pixels (inliers), False/0.0 = other pixels (outliers)
         """
+        # Calculate adaptive residual threshold if requested
+        if adaptive_threshold and residual_threshold is None:
+            residual_threshold = self._calculate_adaptive_residual_threshold(depth)
+        elif residual_threshold is None:
+            residual_threshold = 0.02  # Default fallback (2cm)
+        
         # Convert depth map to 3D points
         points_3d, valid_mask = self._depth_to_points_camera_space(depth)
         
         if len(points_3d) == 0:
             logger.warning("No valid points found in depth map for RANSAC")
-            return np.zeros_like(depth, dtype=np.uint8)
+            return np.zeros_like(depth, dtype=np.float32)
         
         # Apply RANSAC plane fitting
         inlier_mask_points, _ = self._fit_plane_ransac(
@@ -502,10 +561,11 @@ class DentComparisonRenderer:
                 logger.info(f"    Using sigma={sigma_used:.2f} for Gaussian smoothing")
                 
                 # Apply RANSAC plane fitting to detect main panel surface (using smoothed original depth map)
+                # Use adaptive residual threshold to include all corrugations (upper and lower)
                 logger.info(f"    Applying RANSAC plane fitting to detect main panel surface...")
                 panel_mask = self._generate_panel_mask_ransac(
                     original_depth_smoothed,
-                    residual_threshold=0.01,  # 1cm threshold for inliers
+                    adaptive_threshold=True,  # Automatically tune threshold based on corrugation depth
                     max_trials=1000
                 )
                 

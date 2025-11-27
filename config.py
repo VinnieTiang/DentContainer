@@ -85,12 +85,11 @@ class RendererConfig:
     # Camera positioning parameters
     INTERNAL_CAMERA_HEIGHT = 1.5  # Height of camera inside container (meters)
     SHOT_FROM_BACK_OFFSET = 0.5  # Offset from back wall for overall view
-    AERIAL_VIEW_DISTANCE_MULTIPLIER = 1.5  # Multiplier for aerial view distance
-    EXTERNAL_SHOT_DISTANCE = 1.5  # Distance for external shots
-    INTERNAL_DOOR_DISTANCE = 2.5  # Distance from door for internal door view (increased to see more area)
-    INTERNAL_BACK_WALL_DISTANCE = 2.5  # Distance from back wall for back wall view (increased to see more area)
+    INTERNAL_DOOR_DISTANCE = 1.0  # Distance from door for internal door view (increased to see more area)
+    INTERNAL_BACK_WALL_DISTANCE = 2.0  # Distance from back wall for back wall view (increased to see more area)
     INTERNAL_CORNER_SHOT_DISTANCE = 1.5  # Distance from corner for corner views
     INTERNAL_SIDE_WALL_DISTANCE = 0.05  # Distance from opposite wall for side wall views (smaller = camera closer to center = further from target wall = better view of whole panel)
+    INTERNAL_ROOF_CAMERA_HEIGHT = 0.8  # Camera height for roof views (lower than default to increase distance from roof for better coverage)
     
     # Panoramic shot counts
     ROOF_SHOT_COUNT = 5  # Number of roof shots along container length
