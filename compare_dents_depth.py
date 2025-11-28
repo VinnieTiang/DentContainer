@@ -147,7 +147,7 @@ class DentComparisonRenderer:
         return depth
     
     def compare_depths(self, original_depth: np.ndarray, dented_depth: np.ndarray, 
-                      threshold: float = 0.01) -> Tuple[np.ndarray, np.ndarray]:
+                      threshold: float = 0.01, morphology_kernel_size: int = 5) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compare depth maps to identify dented areas.
         
@@ -159,6 +159,8 @@ class DentComparisonRenderer:
             original_depth: Depth map from original container
             dented_depth: Depth map from dented container
             threshold: Depth difference threshold in meters to consider as dent
+            morphology_kernel_size: Kernel size for morphological closing operation (e.g., 3, 5).
+                                   Larger values fill larger gaps. Must be odd (3, 5, 7, etc.).
             
         Returns:
             Tuple of (difference_map, binary_mask)
@@ -185,6 +187,20 @@ class DentComparisonRenderer:
         binary_mask = np.zeros_like(depth_diff, dtype=np.uint8)
         dented_pixels = valid_mask & (depth_diff > threshold)
         binary_mask[dented_pixels] = 255  # WHITE for areas with different depth
+        
+        # Apply morphological closing to fill small gaps and thin black lines inside dented regions
+        # Closing = dilation followed by erosion, which connects nearby white regions and fills holes
+        if morphology_kernel_size > 0:
+            # Ensure kernel size is odd (required by OpenCV)
+            if morphology_kernel_size % 2 == 0:
+                morphology_kernel_size += 1
+                logger.debug(f"Morphology kernel size adjusted to {morphology_kernel_size} (must be odd)")
+            
+            kernel = np.ones((morphology_kernel_size, morphology_kernel_size), np.uint8)
+            binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
+        
+        # Remove thin false-positive regions using connected-component analysis
+        binary_mask = self._filter_thin_components(binary_mask)
         
         return depth_diff, binary_mask
     
@@ -486,17 +502,62 @@ class DentComparisonRenderer:
     def _apply_mask_to_depth(self, depth: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """
         Apply binary mask to depth map using multiplication.
-        
+
         Args:
             depth: Depth map (H, W) in meters
             mask: Binary mask (H, W) where 1.0 = keep, 0.0 = remove
-            
+
         Returns:
             Masked depth map (H, W) where non-masked pixels are set to 0
         """
         # Use multiplication: masked_depth = depth * mask
         masked_depth = depth * mask
         return masked_depth
+
+    def _filter_thin_components(self, binary_mask: np.ndarray,
+                            min_area: int = 80,
+                            min_thickness: int = 5,
+                            max_aspect_ratio: float = 12.0) -> np.ndarray:
+        """
+        Remove thin or small false-positive components from the binary dent mask.
+
+        Args:
+            binary_mask: Input binary mask (uint8), with dent pixels = 255
+            min_area: Minimum area (in pixels) required to keep a component
+            min_thickness: Minimum width/height allowed (removes 1–4 pixel thin lines)
+            max_aspect_ratio: Maximum allowed bounding-box aspect ratio
+                            (components longer than this ratio are removed)
+
+        Returns:
+            Cleaned binary mask with thin/small components removed.
+        """
+        # Copy to avoid modifying original directly
+        cleaned = np.zeros_like(binary_mask)
+
+        # Connected components with stats
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
+
+        for label in range(1, num_labels):   # Skip label 0 (background)
+            x, y, w, h, area = stats[label]
+
+            # --- RULE 1: Remove small noisy regions ---
+            if area < min_area:
+                continue
+
+            # --- RULE 2: Remove very thin lines (1–4 px wide) ---
+            if w < min_thickness or h < min_thickness:
+                continue
+
+            # --- RULE 3: Remove long straight lines (very elongated) ---
+            aspect_ratio = max(w / float(h), h / float(w))
+            if aspect_ratio > max_aspect_ratio:
+                continue
+
+            # Passed all filters → keep component
+            cleaned[labels == label] = 255
+
+        return cleaned
+
     
     def process_container_pair(self, original_path: Path, dented_path: Path, 
                               output_dir: Path, container_type: str = "20ft",
@@ -590,6 +651,12 @@ class DentComparisonRenderer:
                 np.save(original_depth_path, original_depth_masked.astype(np.float32))
                 np.save(dented_depth_path, dented_depth_masked.astype(np.float32))
                 
+                # Also save to dataset folder for training
+                dataset_dir = Path("output_scene_dataset")
+                dataset_dir.mkdir(parents=True, exist_ok=True)
+                dataset_dented_depth_path = dataset_dir / f"{base_name}_{shot_name}_dented_depth.npy"
+                np.save(dataset_dented_depth_path, dented_depth_masked.astype(np.float32))
+                
                 # Save panel mask from RANSAC
                 panel_mask_path = shot_output_dir / f"{base_name}_panel_mask.npy"
                 np.save(panel_mask_path, panel_mask.astype(np.float32))  # Save as float (0 or 1)
@@ -649,6 +716,12 @@ class DentComparisonRenderer:
                 
                 # Save binary mask: WHITE (255) = dented areas (different depth), BLACK (0) = normal areas (same depth)
                 imageio.imwrite(shot_output_dir / f"{base_name}_dent_mask.png", dent_mask)
+                
+                # Also save to dataset folder for training
+                dataset_dir = Path("output_scene_dataset")
+                dataset_dir.mkdir(parents=True, exist_ok=True)
+                dataset_dent_mask_path = dataset_dir / f"{base_name}_{shot_name}_dent_mask.png"
+                imageio.imwrite(dataset_dent_mask_path, dent_mask)
                 
                 # Calculate statistics
                 dent_pixels = np.sum(dent_mask > 0)
