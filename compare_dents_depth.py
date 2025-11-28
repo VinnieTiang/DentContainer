@@ -147,7 +147,8 @@ class DentComparisonRenderer:
         return depth
     
     def compare_depths(self, original_depth: np.ndarray, dented_depth: np.ndarray, 
-                      threshold: float = 0.01, morphology_kernel_size: int = 5) -> Tuple[np.ndarray, np.ndarray]:
+                      threshold: float = 0.01, morphology_kernel_size: int = 9,
+                      gap_fill_threshold_ratio: float = 0.5, gap_fill_distance: int = 7) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compare depth maps to identify dented areas.
         
@@ -159,8 +160,11 @@ class DentComparisonRenderer:
             original_depth: Depth map from original container
             dented_depth: Depth map from dented container
             threshold: Depth difference threshold in meters to consider as dent
-            morphology_kernel_size: Kernel size for morphological closing operation (e.g., 3, 5).
-                                   Larger values fill larger gaps. Must be odd (3, 5, 7, etc.).
+            morphology_kernel_size: Kernel size for morphological closing operation (e.g., 3, 5, 9).
+                                   Larger values fill larger gaps. Must be odd (3, 5, 7, etc.). Default: 9.
+            gap_fill_threshold_ratio: Ratio of threshold to use for gap-filling near existing dents (default: 0.5).
+                                     Lower values fill more gaps but may include more false positives.
+            gap_fill_distance: Distance in pixels to search around existing dent regions for gap-filling (default: 7).
             
         Returns:
             Tuple of (difference_map, binary_mask)
@@ -187,6 +191,21 @@ class DentComparisonRenderer:
         binary_mask = np.zeros_like(depth_diff, dtype=np.uint8)
         dented_pixels = valid_mask & (depth_diff > threshold)
         binary_mask[dented_pixels] = 255  # WHITE for areas with different depth
+        
+        # Gap-filling step: Use a lower threshold for pixels near existing dent regions
+        # This fills gaps between white segments by marking nearby pixels with smaller depth differences as dented
+        if gap_fill_distance > 0 and gap_fill_threshold_ratio > 0:
+            # Create a dilated version of existing dent regions to identify nearby pixels
+            dilation_kernel = np.ones((gap_fill_distance * 2 + 1, gap_fill_distance * 2 + 1), np.uint8)
+            dilated_mask = cv2.dilate(binary_mask, dilation_kernel, iterations=1)
+            
+            # Find pixels that are near existing dents but not yet marked as dents
+            nearby_pixels = (dilated_mask > 0) & (binary_mask == 0) & valid_mask
+            
+            # Use a lower threshold for these nearby pixels to fill gaps
+            gap_fill_threshold = threshold * gap_fill_threshold_ratio
+            gap_fill_pixels = nearby_pixels & (depth_diff > gap_fill_threshold)
+            binary_mask[gap_fill_pixels] = 255
         
         # Apply morphological closing to fill small gaps and thin black lines inside dented regions
         # Closing = dilation followed by erosion, which connects nearby white regions and fills holes

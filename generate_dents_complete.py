@@ -897,7 +897,7 @@ class DentGenerator:
         self._highlight_dented_vertices(mask, normalized_dist)
     
     def add_dent(self, dent_type: str = 'random', 
-                 size_range: Tuple[float, float] = (0.08, 0.50),
+                 size_range: Tuple[float, float] = (0.12, 0.65),
                  depth_range: Tuple[float, float] = (0.008, 0.06),
                  severity: str = 'normal',
                  **kwargs):
@@ -989,8 +989,8 @@ class DentGenerator:
     
     def add_multiple_dents(self, num_dents: int = 5,
                           dent_type_distribution: Dict[str, float] = None,
-                          size_range: Tuple[float, float] = (0.08, 0.50),
-                          depth_range: Tuple[float, float] = (0.02, 0.15),
+                          size_range: Tuple[float, float] = (0.12, 0.65),
+                          depth_range: Tuple[float, float] = (0.008, 0.06),
                           varied_severity: bool = True):
         """
         Add multiple dents with realistic distribution.
@@ -1056,7 +1056,7 @@ class DentGenerator:
 def add_dents_to_container(input_path: str, output_path: str,
                           num_dents: int = 5,
                           dent_type_distribution: Dict[str, float] = None,
-                          size_range: Tuple[float, float] = (0.08, 0.50),
+                          size_range: Tuple[float, float] = (0.12, 0.65),
                           depth_range: Tuple[float, float] = (0.008, 0.06),
                           varied_severity: bool = True,
                           save_specs: bool = True):
@@ -1071,7 +1071,7 @@ def add_dents_to_container(input_path: str, output_path: str,
     - Displacement constraints prevent mesh tearing
     
     MODERATE DAMAGE DEFAULTS:
-    - Size: 8-50cm (impact zones)
+    - Size: 12-65cm (impact zones, increased area)
     - Depth: 8-60mm (moderate depressions, reduced from 2-15cm)
     - Varied severity creates mix of minor to moderate damage
     
@@ -1159,7 +1159,7 @@ def add_dents_to_container(input_path: str, output_path: str,
 def batch_process_containers(input_folder: str = "complete_containers",
                             output_folder: str = "complete_containers_dents",
                             num_dents: int = 5,
-                            size_range: Tuple[float, float] = (0.08, 0.50),
+                            size_range: Tuple[float, float] = (0.12, 0.65),
                             depth_range: Tuple[float, float] = (0.008, 0.06),
                             varied_severity: bool = True):
     """
@@ -1167,14 +1167,14 @@ def batch_process_containers(input_folder: str = "complete_containers",
     AUTOMATICALLY EXCLUDES FLOOR PANEL from dents.
     
     MODERATE DAMAGE DEFAULTS:
-    - Size: 8-50cm (impact zones)
+    - Size: 12-65cm (impact zones, increased area)
     - Depth: 8-60mm (moderate depressions, reduced from 2-15cm)
     
     Args:
         input_folder: Folder containing input container OBJ files
         output_folder: Folder to save dented containers
         num_dents: Number of dents to add per container
-        size_range: (min, max) size in meters (default: 8-50cm)
+        size_range: (min, max) size in meters (default: 12-65cm, increased area)
         depth_range: (min, max) depth in meters (default: 8-60mm, reduced from 2-15cm)
         varied_severity: If True, mix light and heavy damage for variety
     """
@@ -1274,12 +1274,12 @@ Examples:
                        help='Output dented container OBJ file (required if input is provided)')
     parser.add_argument('--num-dents', type=int, default=5,
                        help='Number of dents to add (default: 5)')
-    parser.add_argument('--min-size', type=float, default=0.08,
-                       help='Minimum dent size in meters (default: 0.08 = 8cm for serious damage)')
-    parser.add_argument('--max-size', type=float, default=0.50,
-                       help='Maximum dent size in meters (default: 0.50 = 50cm for serious damage)')
-    parser.add_argument('--min-depth', type=float, default=0.008,
-                       help='Minimum dent depth in meters (default: 0.008 = 8mm, reduced from 2cm)')
+    parser.add_argument('--min-size', type=float, default=0.12,
+                       help='Minimum dent size in meters (default: 0.12 = 12cm, increased area)')
+    parser.add_argument('--max-size', type=float, default=0.65,
+                       help='Maximum dent size in meters (default: 0.65 = 65cm, increased area)')
+    parser.add_argument('--min-depth', type=float, default=0.03,
+                       help='Minimum dent depth in meters (default: 0.03 = 30mm, reduced from 2cm)')
     parser.add_argument('--max-depth', type=float, default=0.06,
                        help='Maximum dent depth in meters (default: 0.06 = 60mm, reduced from 15cm)')
     parser.add_argument('--no-varied-severity', action='store_true',
