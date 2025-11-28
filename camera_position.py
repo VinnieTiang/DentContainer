@@ -28,7 +28,7 @@ class CameraPoseGenerator:
 
         poses = []
         poses.extend(self._get_internal_end_wall_views(length, height, width))
-        poses.extend(self._get_internal_corner_views(length, height, width))
+        # poses.extend(self._get_internal_corner_views(length, height, width))  # Corner captures commented out
         poses.extend(self._get_internal_roof_views(length, height, width))
         poses.extend(self._get_internal_side_wall_views(length, height, width))
         
@@ -78,28 +78,29 @@ class CameraPoseGenerator:
         })
         return poses
 
-    def _get_internal_corner_views(self, length: float, height: float, width: float) -> List[Dict]:
-        """Generates internal views of the four corners from a closer vantage point."""
-        poses = []
-        cam_height = self.r_config.INTERNAL_CAMERA_HEIGHT
-        dist = self.r_config.INTERNAL_CORNER_SHOT_DISTANCE
-
-        # Position camera 1.5m from the corner, looking towards the vertical center of the corner.
-        corners = {
-            "back_left":   {"at": [-length / 2, height / 2, -width / 2], "eye": [-length / 2 + dist, cam_height, -width / 2 + dist]},
-            "back_right":  {"at": [-length / 2, height / 2,  width / 2], "eye": [-length / 2 + dist, cam_height,  width / 2 - dist]},
-            "front_left":  {"at": [ length / 2, height / 2, -width / 2], "eye": [ length / 2 - dist, cam_height, -width / 2 + dist]},
-            "front_right": {"at": [ length / 2, height / 2,  width / 2], "eye": [ length / 2 - dist, cam_height,  width / 2 - dist]}
-        }
-        
-        for name, pos in corners.items():
-            poses.append({
-                "name": f"internal_corner_{name}",
-                "eye": torch.tensor([pos["eye"]]),
-                "at": torch.tensor([pos["at"]]),
-                "up": torch.tensor([[0, 1, 0]])
-            })
-        return poses
+    # Corner camera captures commented out
+    # def _get_internal_corner_views(self, length: float, height: float, width: float) -> List[Dict]:
+    #     """Generates internal views of the four corners from a closer vantage point."""
+    #     poses = []
+    #     cam_height = self.r_config.INTERNAL_CAMERA_HEIGHT
+    #     dist = self.r_config.INTERNAL_CORNER_SHOT_DISTANCE
+    #
+    #     # Position camera 1.5m from the corner, looking towards the vertical center of the corner.
+    #     corners = {
+    #         "back_left":   {"at": [-length / 2, height / 2, -width / 2], "eye": [-length / 2 + dist, cam_height, -width / 2 + dist]},
+    #         "back_right":  {"at": [-length / 2, height / 2,  width / 2], "eye": [-length / 2 + dist, cam_height,  width / 2 - dist]},
+    #         "front_left":  {"at": [ length / 2, height / 2, -width / 2], "eye": [ length / 2 - dist, cam_height, -width / 2 + dist]},
+    #         "front_right": {"at": [ length / 2, height / 2,  width / 2], "eye": [ length / 2 - dist, cam_height,  width / 2 - dist]}
+    #     }
+    #     
+    #     for name, pos in corners.items():
+    #         poses.append({
+    #             "name": f"internal_corner_{name}",
+    #             "eye": torch.tensor([pos["eye"]]),
+    #             "at": torch.tensor([pos["at"]]),
+    #             "up": torch.tensor([[0, 1, 0]])
+    #         })
+    #     return poses
 
     def _get_internal_roof_views(self, length: float, height: float, width: float) -> List[Dict]:
         """

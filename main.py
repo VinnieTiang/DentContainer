@@ -381,13 +381,14 @@ def cleanup_scene_outputs():
     """Clean up all scene rendering outputs before creating new ones"""
     print("\n🧹 Cleaning up previous scene rendering outputs...")
     
-    # Directory to clean
+    # Directories to clean
     output_dir = Path("output_scene")
+    dataset_dir = Path("output_scene_dataset")
     
     files_removed = 0
     dirs_removed = 0
     
-    # Count files before removing
+    # Count and remove output_scene directory
     if output_dir.exists():
         # Count all files
         all_files = list(output_dir.glob("*"))
@@ -402,6 +403,23 @@ def cleanup_scene_outputs():
             dirs_removed += 1
         except Exception as e:
             print(f"  ✗ Failed to remove {output_dir}: {e}")
+    
+    # Count and remove output_scene_dataset directory
+    if dataset_dir.exists():
+        # Count all files
+        dataset_files = list(dataset_dir.glob("*"))
+        dataset_files_count = len(dataset_files)
+        
+        # Remove output_scene_dataset directory and all contents
+        try:
+            shutil.rmtree(dataset_dir)
+            print(f"  ✓ Removed directory: {dataset_dir}")
+            if dataset_files_count > 0:
+                print(f"  ✓ Removed {dataset_files_count} file(s) from dataset folder")
+            dirs_removed += 1
+            files_removed += dataset_files_count
+        except Exception as e:
+            print(f"  ✗ Failed to remove {dataset_dir}: {e}")
     
     print(f"  📊 Scene output cleanup: {files_removed} files, {dirs_removed} directories removed")
     return files_removed + dirs_removed > 0
