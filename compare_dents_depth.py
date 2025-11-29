@@ -693,13 +693,6 @@ class DentComparisonRenderer:
                 smoothed_depth_img = self._normalize_depth(original_depth_smoothed)
                 imageio.imwrite(shot_output_dir / f"{base_name}_debug_smoothed_depth.png", smoothed_depth_img)
                 
-                # 3. RANSAC panel mask (already saved above, but add debug prefix for clarity)
-                imageio.imwrite(shot_output_dir / f"{base_name}_debug_panel_mask.png", panel_mask_uint8)
-                
-                # 4. Final masked depth (original unsmoothed depth with mask applied)
-                masked_depth_img = self._normalize_depth(original_depth_masked)
-                imageio.imwrite(shot_output_dir / f"{base_name}_debug_masked_depth.png", masked_depth_img)
-                
                 # Save depth difference
                 depth_diff_path = shot_output_dir / f"{base_name}_depth_diff.npy"
                 np.save(depth_diff_path, depth_diff.astype(np.float32))

@@ -96,6 +96,10 @@ def load_output_scene_data():
             for file_path in shot_dir.iterdir():
                 filename = file_path.name
                 
+                # Skip debug files - they are for debugging only, not for display
+                if 'debug_' in filename:
+                    continue
+                
                 if '_original_rgb.png' in filename:
                     shot_files['original_rgb'] = file_path
                 elif '_dented_rgb.png' in filename:
