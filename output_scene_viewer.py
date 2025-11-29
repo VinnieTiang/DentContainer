@@ -2,6 +2,10 @@
 """
 Output Scene Viewer - Comprehensive UI for visualizing container scene data
 Visualizes all containers, shots, RGB-D images, depth differences, and statistics
+
+Note: If you see a RuntimeError about torch.classes during startup, this is harmless.
+It occurs because Streamlit's file watcher tries to inspect PyTorch modules.
+The app will function normally despite this error.
 """
 
 import streamlit as st
@@ -82,6 +86,7 @@ def load_output_scene_data():
                 'dented_depth_png': None,
                 'depth_diff_png': None,
                 'dent_mask': None,
+                'visual_output': None,
                 'original_depth_npy': None,
                 'dented_depth_npy': None,
                 'depth_diff_npy': None,
@@ -112,6 +117,8 @@ def load_output_scene_data():
                     shot_files['depth_diff_png'] = file_path
                 elif '_dent_mask.png' in filename:
                     shot_files['dent_mask'] = file_path
+                elif '_visualOutput.png' in filename:
+                    shot_files['visual_output'] = file_path
                 elif '_original_depth.npy' in filename:
                     shot_files['original_depth_npy'] = file_path
                 elif '_dented_depth.npy' in filename:
@@ -229,6 +236,117 @@ def load_ply_pointcloud(file_path):
     except Exception as e:
         st.error(f"Error loading PLY file {file_path}: {e}")
         return None, None
+
+def transform_pointcloud_to_camera_view(vertices, camera_pose):
+    """
+    Transform point cloud from world coordinates to camera view coordinates.
+    
+    This reverses the transformation used in compare_dents_depth.py when creating PLY files.
+    The camera view coordinate system matches image orientation:
+    - X axis: Width (horizontal, right direction) - matches image u coordinate (left to right)
+    - Y axis: Depth (forward, toward the panel from camera) - matches image depth
+    - Z axis: Height (vertical, DOWNWARD direction) - matches image v coordinate (top to bottom, v increases downward)
+    
+    In compare_dents_depth.py:
+    - Camera space: x_cam (horizontal), y_cam (vertical, increases downward), z_cam (depth forward)
+    - Transformation: R_cam_to_world = [right, up_corrected, -forward]
+    - World space: points_world = R_cam_to_world @ points_cam + eye
+    
+    To reverse this:
+    - World space → Camera space: points_cam = R_cam_to_world^T @ (points_world - eye)
+    - Then rearrange to match image: X=width, Y=depth, Z=height (downward)
+    
+    Args:
+        vertices: Point cloud vertices in world coordinates (N, 3)
+        camera_pose: Dictionary with 'eye', 'at', 'up' vectors
+    
+    Returns:
+        Transformed vertices in camera view coordinates (N, 3)
+    """
+    eye = camera_pose['eye']
+    at = camera_pose['at']
+    up = camera_pose['up']
+    
+    # Calculate camera coordinate system (matching compare_dents_depth.py exactly)
+    # Forward direction: from eye to at (points toward the panel)
+    forward = at - eye
+    forward = forward / (np.linalg.norm(forward) + 1e-8)
+    
+    # Right direction: cross product of forward and up (matching compare_dents_depth.py line 962)
+    right = np.cross(forward, up)
+    right = right / (np.linalg.norm(right) + 1e-8)
+    
+    # Up direction: cross product of right and forward (matching compare_dents_depth.py line 964)
+    up_corrected = np.cross(right, forward)
+    up_corrected = up_corrected / (np.linalg.norm(up_corrected) + 1e-8)
+    
+    # Build camera-to-world rotation matrix (matching compare_dents_depth.py line 967)
+    R_cam_to_world = np.stack([right, up_corrected, -forward], axis=1)
+    
+    # Transform vertices from world to camera space
+    # Translate to camera position (eye)
+    vertices_translated = vertices - eye
+    
+    # Rotate to camera coordinate system (inverse of R_cam_to_world is its transpose)
+    R_world_to_cam = R_cam_to_world.T
+    vertices_cam = (R_world_to_cam @ vertices_translated.T).T
+    
+    # Now rearrange to match image orientation:
+    # In original camera space: [x_cam, y_cam, z_cam] where:
+    #   x_cam = horizontal (width, left to right) → our X
+    #   y_cam = vertical (height, TOP to BOTTOM, increases downward) → our Z (flipped)
+    #   z_cam = depth (forward) → our Y
+    # 
+    # Our desired camera view: [X=width, Y=depth, Z=height]
+    # So: X = x_cam, Y = z_cam, Z = -y_cam (flip because image Y increases downward)
+    vertices_camera_view = np.column_stack([
+        vertices_cam[:, 0],   # X = width (horizontal, left to right)
+        vertices_cam[:, 2],   # Y = depth (forward, toward panel)
+        -vertices_cam[:, 1]   # Z = height (vertical, TOP to BOTTOM, matches image v coordinate)
+    ])
+    
+    return vertices_camera_view
+
+def get_camera_view_eye_position(camera_pose, scene_bounds=None):
+    """
+    Calculate the initial camera eye position for plotly visualization.
+    This positions the viewer behind the camera, looking at the target panel.
+    
+    In camera view coordinates (matching image orientation):
+    - X = Width (horizontal, left to right)
+    - Y = Depth (positive Y points toward panel from camera)
+    - Z = Height (vertical, TOP to BOTTOM, increases downward like image v coordinate)
+    
+    Args:
+        camera_pose: Dictionary with 'eye', 'at', 'up' vectors
+        scene_bounds: Optional tuple (min_point, max_point) for scene bounds
+    
+    Returns:
+        Dictionary with 'eye', 'center', 'up' for plotly camera
+    """
+    eye = camera_pose['eye']
+    at = camera_pose['at']
+    
+    # Estimate scene size if bounds provided
+    if scene_bounds:
+        scene_size = np.max(scene_bounds[1] - scene_bounds[0])
+    else:
+        distance = np.linalg.norm(at - eye)
+        scene_size = distance * 2
+    
+    # Position viewer behind the camera in camera view coordinates
+    # Looking along positive Y axis (toward the panel)
+    # Eye position: slightly back and elevated for good view
+    # Note: Z increases downward (like image v), so negative Z is "up" (top of image)
+    eye_x = 0  # Centered horizontally
+    eye_y = -scene_size * 0.8  # Behind the camera (negative Y, looking toward positive Y)
+    eye_z = -scene_size * 0.3  # Above the scene (negative Z = top of image, since Z increases downward)
+    
+    return {
+        'eye': {'x': eye_x, 'y': eye_y, 'z': eye_z},
+        'center': {'x': 0, 'y': 0, 'z': 0},
+        'up': {'x': 0, 'y': 0, 'z': -1}  # Negative Z is up (top of image, since Z increases downward)
+    }
 
 def visualize_pointcloud_3d(vertices, colors=None, title="3D Point Cloud"):
     """Create 3D visualization of point cloud using plotly"""
@@ -795,12 +913,10 @@ def main():
         if selected_container['comparison_summary']:
             summary = selected_container['comparison_summary']
             st.write(f"**Type:** {summary.get('container_type', 'Unknown')}")
-            st.write(f"**Original:** {summary.get('original_file', 'Unknown')}")
-            st.write(f"**Dented:** {summary.get('dented_file', 'Unknown')}")
             if 'timestamp' in summary:
                 try:
                     ts = datetime.fromisoformat(summary['timestamp'])
-                    st.write(f"**Generated:** {ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                    st.write(f"**Generated:** {ts.strftime('%Y-%m-%d %H:%M')}")
                 except:
                     st.write(f"**Generated:** {summary['timestamp']}")
         
@@ -881,7 +997,6 @@ def main():
             if shot_files['original_rgb'] and shot_files['original_rgb'].exists():
                 original_rgb = imageio.imread(shot_files['original_rgb'])
                 st.image(original_rgb, caption="Original RGB", use_container_width=True)
-                st.caption(f"Resolution: {original_rgb.shape[1]}×{original_rgb.shape[0]} pixels")
             else:
                 st.info("Original RGB image not found")
         
@@ -889,7 +1004,6 @@ def main():
             if shot_files['dented_rgb'] and shot_files['dented_rgb'].exists():
                 dented_rgb = imageio.imread(shot_files['dented_rgb'])
                 st.image(dented_rgb, caption="Dented RGB", use_container_width=True)
-                st.caption(f"Resolution: {dented_rgb.shape[1]}×{dented_rgb.shape[0]} pixels")
             else:
                 st.info("Dented RGB image not found")
         
@@ -946,20 +1060,14 @@ def main():
             else:
                 st.info("Depth difference image not found")
         
-        # Dent Mask
-        st.markdown("### Dent Mask")
-        mask_col1, mask_col2 = st.columns([2, 1])
-        
-        # Initialize mask variables
-        dent_mask = None
-        white_pixels = 0
-        total_pixels = 0
-        dent_percentage = 0.0
+        # Dent Mask and Visual Output
+        st.markdown("### Dent Detection Visualization")
+        mask_col1, mask_col2 = st.columns(2)
         
         with mask_col1:
+            st.markdown("#### Dent Mask")
             if shot_files['dent_mask'] and shot_files['dent_mask'].exists():
                 dent_mask = imageio.imread(shot_files['dent_mask'])
-                st.image(dent_mask, caption="Dent Mask", use_container_width=True)
                 
                 # Calculate mask statistics
                 if len(dent_mask.shape) == 3:
@@ -971,17 +1079,17 @@ def main():
                 total_pixels = mask_gray.size
                 dent_percentage = (white_pixels / total_pixels) * 100
                 
-                st.caption(f"Dent pixels: {white_pixels:,} ({dent_percentage:.2f}%)")
+                st.image(dent_mask, caption=f"Dent Mask - {white_pixels:,} pixels ({dent_percentage:.2f}%)", use_container_width=True)
             else:
                 st.info("Dent mask image not found")
         
         with mask_col2:
-            if shot_files['dent_mask'] and shot_files['dent_mask'].exists() and dent_mask is not None:
-                st.metric("Dent Pixels", f"{white_pixels:,}")
-                st.metric("Total Pixels", f"{total_pixels:,}")
-                st.metric("Dent Coverage", f"{dent_percentage:.2f}%")
+            st.markdown("#### Visual Output (Dent Labels)")
+            if shot_files['visual_output'] and shot_files['visual_output'].exists():
+                visual_output = imageio.imread(shot_files['visual_output'])
+                st.image(visual_output, caption="RGB Image with Dent Labels", use_container_width=True)
             else:
-                st.info("No mask data")
+                st.info("Visual output image not found")
     
     with tab2:
         st.subheader("Shot Statistics")
@@ -990,31 +1098,25 @@ def main():
             stats = selected_shot['stats']
             
             # Key metrics
-            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+            metric_col1, metric_col2, metric_col3 = st.columns(3)
             
             with metric_col1:
                 st.metric("Dent Pixels", f"{stats.get('dent_pixels', 0):,}")
             with metric_col2:
-                st.metric("Total Pixels", f"{stats.get('total_pixels', 0):,}")
-            with metric_col3:
                 st.metric("Dent Percentage", f"{stats.get('dent_percentage', 0):.2f}%")
-            with metric_col4:
-                st.metric("Output Directory", stats.get('output_dir', 'N/A'))
+            with metric_col3:
+                st.metric("Max Depth Diff", f"{stats.get('max_depth_diff_mm', 0):.2f} mm")
             
             st.divider()
             
             # Depth metrics
             st.markdown("### Depth Metrics")
-            depth_metric_col1, depth_metric_col2, depth_metric_col3, depth_metric_col4 = st.columns(4)
+            depth_metric_col1, depth_metric_col2 = st.columns(2)
             
             with depth_metric_col1:
-                st.metric("Max Depth Diff (m)", f"{stats.get('max_depth_diff_m', 0):.4f}")
+                st.metric("Max Depth Difference", f"{stats.get('max_depth_diff_mm', 0):.2f} mm")
             with depth_metric_col2:
-                st.metric("Max Depth Diff (mm)", f"{stats.get('max_depth_diff_mm', 0):.2f}")
-            with depth_metric_col3:
-                st.metric("Mean Depth Diff (m)", f"{stats.get('mean_depth_diff_m', 0):.4f}")
-            with depth_metric_col4:
-                st.metric("Mean Depth Diff (mm)", f"{stats.get('mean_depth_diff_mm', 0):.2f}")
+                st.metric("Mean Depth Difference", f"{stats.get('mean_depth_diff_mm', 0):.2f} mm")
             
             # Visual indicators
             st.divider()
@@ -1174,15 +1276,12 @@ def main():
                 
                 with hist_col2:
                     # Statistics
-                    st.markdown("#### Statistics")
-                    st.write(f"**Non-zero pixels:** {len(depth_filtered):,}")
-                    st.write(f"**Mean:** {np.mean(depth_filtered) * 1000:.2f} mm")
-                    st.write(f"**Median:** {np.median(depth_filtered) * 1000:.2f} mm")
-                    st.write(f"**Std Dev:** {np.std(depth_filtered) * 1000:.2f} mm")
-                    st.write(f"**Min:** {np.min(depth_filtered) * 1000:.2f} mm")
-                    st.write(f"**Max:** {np.max(depth_filtered) * 1000:.2f} mm")
-                    st.write(f"**95th Percentile:** {np.percentile(depth_filtered, 95) * 1000:.2f} mm")
-                    st.write(f"**99th Percentile:** {np.percentile(depth_filtered, 99) * 1000:.2f} mm")
+                    st.markdown("#### Key Statistics")
+                    st.metric("Non-zero Pixels", f"{len(depth_filtered):,}")
+                    st.metric("Mean Depth Diff", f"{np.mean(depth_filtered) * 1000:.2f} mm")
+                    st.metric("Median Depth Diff", f"{np.median(depth_filtered) * 1000:.2f} mm")
+                    st.metric("Max Depth Diff", f"{np.max(depth_filtered) * 1000:.2f} mm")
+                    st.metric("95th Percentile", f"{np.percentile(depth_filtered, 95) * 1000:.2f} mm")
             
             # 3D depth visualization
             st.markdown("### 3D Depth Visualization")
@@ -1217,33 +1316,6 @@ def main():
             
             st.plotly_chart(fig_3d, use_container_width=True)
             
-            # Comparison with original and dented
-            if original_depth_data is not None and dented_depth_data is not None:
-                st.markdown("### Depth Comparison")
-                
-                comp_col1, comp_col2 = st.columns(2)
-                
-                with comp_col1:
-                    st.markdown("#### Original Depth")
-                    orig_flat = original_depth_data.flatten()
-                    fig_orig = px.histogram(
-                        x=orig_flat,
-                        nbins=50,
-                        title="Original Depth Distribution (m)",
-                        labels={'x': 'Depth (m)', 'y': 'Frequency'}
-                    )
-                    st.plotly_chart(fig_orig, use_container_width=True)
-                
-                with comp_col2:
-                    st.markdown("#### Dented Depth")
-                    dented_flat = dented_depth_data.flatten()
-                    fig_dented = px.histogram(
-                        x=dented_flat,
-                        nbins=50,
-                        title="Dented Depth Distribution (m)",
-                        labels={'x': 'Depth (m)', 'y': 'Frequency'}
-                    )
-                    st.plotly_chart(fig_dented, use_container_width=True)
         else:
             st.warning("Depth difference data (NPY) not available for analysis")
     
@@ -1278,19 +1350,32 @@ def main():
                     vertices, colors = load_ply_pointcloud(selected_ply_path)
                 
                 if vertices is not None and len(vertices) > 0:
-                    # Point cloud statistics
-                    stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+                    # Get camera pose for this shot to transform to camera view
+                    container_type = "20ft"  # Default
+                    if selected_container['comparison_summary']:
+                        container_type = selected_container['comparison_summary'].get('container_type', '20ft')
+                    
+                    camera_pose = None
+                    vertices_camera_view = vertices
+                    camera_view_eye = None
+                    
+                    if CAMERA_POSE_GENERATOR_AVAILABLE:
+                        camera_pose = get_camera_pose_for_shot(selected_shot_name, container_type)
+                        if camera_pose:
+                            # Transform point cloud to camera view coordinates
+                            vertices_camera_view = transform_pointcloud_to_camera_view(vertices, camera_pose)
+                            # Calculate scene bounds for camera positioning
+                            scene_bounds = (vertices_camera_view.min(axis=0), vertices_camera_view.max(axis=0))
+                            camera_view_eye = get_camera_view_eye_position(camera_pose, scene_bounds)
+                    
+                    # Point cloud statistics (use camera view vertices for stats)
+                    stats_col1, stats_col2 = st.columns(2)
                     
                     with stats_col1:
                         st.metric("Total Points", f"{len(vertices):,}")
                     with stats_col2:
-                        st.metric("Has Colors", "Yes" if colors is not None else "No")
-                    with stats_col3:
-                        bounds = vertices.max(axis=0) - vertices.min(axis=0)
-                        st.metric("Size (X×Y×Z)", f"{bounds[0]:.2f}×{bounds[1]:.2f}×{bounds[2]:.2f} m")
-                    with stats_col4:
-                        center = vertices.mean(axis=0)
-                        st.metric("Center", f"({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f})")
+                        bounds = vertices_camera_view.max(axis=0) - vertices_camera_view.min(axis=0)
+                        st.metric("Size (Width × Depth × Height)", f"{bounds[0]:.2f} × {bounds[1]:.2f} × {bounds[2]:.2f} m")
                     
                     st.divider()
                     
@@ -1302,21 +1387,24 @@ def main():
                         
                         color_mode = st.selectbox(
                             "Color Mode:",
-                            ["Z Coordinate (Depth)", "RGB Colors", "Uniform Color"],
-                            index=0 if colors is None else 1
+                            ["Y Coordinate (Depth)", "Z Coordinate (Height)", "Uniform Color"],
+                            index=0
                         )
                         
-                        point_size = st.slider("Point Size", 1, 10, 2)
+                        point_size = st.slider("Point Size", 1, 5, 1)
                         
                         max_display_points = st.slider(
                             "Max Points to Display",
                             1000, 100000, 50000,
                             help="Reduce for better performance with large point clouds"
                         )
+                        
+                        if camera_pose:
+                            st.info("📷 View aligned with camera capture")
                     
                     with viz_col1:
                         # Prepare visualization
-                        display_vertices = vertices
+                        display_vertices = vertices_camera_view
                         display_colors = colors
                         
                         # Downsample if needed
@@ -1327,24 +1415,19 @@ def main():
                                 display_colors = display_colors[indices]
                         
                         # Create visualization based on color mode
-                        if color_mode == "Z Coordinate (Depth)":
-                            z_coords = display_vertices[:, 2]
+                        if color_mode == "Y Coordinate (Depth)":
+                            y_coords = display_vertices[:, 1]  # Y axis = Depth
+                            y_normalized = (y_coords - y_coords.min()) / (y_coords.max() - y_coords.min() + 1e-8)
+                            color_data = y_normalized
+                            color_title = "Y Coordinate (Depth)"
+                            use_colorscale = True
+                        elif color_mode == "Z Coordinate (Height)":
+                            z_coords = display_vertices[:, 2]  # Z axis = Height
                             z_normalized = (z_coords - z_coords.min()) / (z_coords.max() - z_coords.min() + 1e-8)
                             color_data = z_normalized
-                            color_title = "Z Coordinate (Depth)"
+                            color_title = "Z Coordinate (Height)"
                             use_colorscale = True
-                        elif color_mode == "RGB Colors" and display_colors is not None:
-                            if display_colors.shape[1] == 3:
-                                if display_colors.max() > 1.0:
-                                    display_colors = display_colors / 255.0
-                                color_data = [f'rgb({int(c[0]*255)},{int(c[1]*255)},{int(c[2]*255)})' for c in display_colors]
-                                color_title = "RGB Colors"
-                                use_colorscale = False
-                            else:
-                                color_data = 'blue'
-                                color_title = "Uniform"
-                                use_colorscale = False
-                        else:
+                        else:  # Uniform Color
                             color_data = 'blue'
                             color_title = "Uniform"
                             use_colorscale = False
@@ -1353,9 +1436,9 @@ def main():
                         fig = go.Figure()
                         
                         fig.add_trace(go.Scatter3d(
-                            x=display_vertices[:, 0],
-                            y=display_vertices[:, 1],
-                            z=display_vertices[:, 2],
+                            x=display_vertices[:, 0],  # X = Width
+                            y=display_vertices[:, 1],  # Y = Depth
+                            z=display_vertices[:, 2],  # Z = Height
                             mode='markers',
                             marker=dict(
                                 size=point_size,
@@ -1368,15 +1451,20 @@ def main():
                             name="Point Cloud"
                         ))
                         
+                        # Set camera view
+                        if camera_view_eye:
+                            camera_dict = camera_view_eye
+                        else:
+                            # Default view
+                            camera_dict = dict(eye=dict(x=1.5, y=-1.5, z=1.5))
+                        
                         fig.update_layout(
                             title=f"3D Point Cloud ({selected_ply_name}) - {format_shot_name(selected_shot_name)}",
                             scene=dict(
                                 xaxis_title="X (Width, meters)",
-                                yaxis_title="Y (Length, meters)",
+                                yaxis_title="Y (Depth, meters)",
                                 zaxis_title="Z (Height, meters)",
-                                camera=dict(
-                                    eye=dict(x=1.5, y=1.5, z=1.5)
-                                ),
+                                camera=camera_dict,
                                 aspectmode='data'
                             ),
                             height=700,
@@ -1385,25 +1473,6 @@ def main():
                         
                         st.plotly_chart(fig, use_container_width=True)
                     
-                    # Additional information
-                    st.divider()
-                    st.markdown("### Point Cloud Details")
-                    
-                    info_col1, info_col2 = st.columns(2)
-                    
-                    with info_col1:
-                        st.markdown("#### Bounding Box")
-                        bbox_min = vertices.min(axis=0)
-                        bbox_max = vertices.max(axis=0)
-                        st.write(f"**Min:** ({bbox_min[0]:.3f}, {bbox_min[1]:.3f}, {bbox_min[2]:.3f}) m")
-                        st.write(f"**Max:** ({bbox_max[0]:.3f}, {bbox_max[1]:.3f}, {bbox_max[2]:.3f}) m")
-                        st.write(f"**Extent:** ({bbox_max[0]-bbox_min[0]:.3f}, {bbox_max[1]-bbox_min[1]:.3f}, {bbox_max[2]-bbox_min[2]:.3f}) m")
-                    
-                    with info_col2:
-                        st.markdown("#### Statistics")
-                        st.write(f"**Mean:** ({vertices[:, 0].mean():.3f}, {vertices[:, 1].mean():.3f}, {vertices[:, 2].mean():.3f}) m")
-                        st.write(f"**Std Dev:** ({vertices[:, 0].std():.3f}, {vertices[:, 1].std():.3f}, {vertices[:, 2].std():.3f}) m")
-                        st.write(f"**File:** {selected_ply_path.name}")
                 else:
                     st.error("Failed to load point cloud data from PLY file")
         else:
@@ -1433,113 +1502,53 @@ def main():
             else:
         
                 # Display camera information
-                # Coordinate system: X=Width, Y=Length, Z=Height
-                # Swap coordinates: [width, length, height] = [original_z, original_x, original_y]
-                info_col1, info_col2 = st.columns(2)
-                
-                with info_col1:
-                    st.markdown("### 📍 Camera Position (Eye)")
-                    eye = camera_pose['eye']
-                    eye_swapped_display = np.array([eye[2], eye[0], eye[1]])  # [width, length, height]
-                    st.write(f"**X (Width):** {eye_swapped_display[0]:.3f} m")
-                    st.write(f"**Y (Length):** {eye_swapped_display[1]:.3f} m")
-                    st.write(f"**Z (Height):** {eye_swapped_display[2]:.3f} m")
-                    st.write(f"**Position:** `[{eye_swapped_display[0]:.3f}, {eye_swapped_display[1]:.3f}, {eye_swapped_display[2]:.3f}]`")
-                
-                with info_col2:
-                    st.markdown("### 🎯 Camera Target (At)")
-                    at = camera_pose['at']
-                    at_swapped_display = np.array([at[2], at[0], at[1]])  # [width, length, height]
-                    st.write(f"**X (Width):** {at_swapped_display[0]:.3f} m")
-                    st.write(f"**Y (Length):** {at_swapped_display[1]:.3f} m")
-                    st.write(f"**Z (Height):** {at_swapped_display[2]:.3f} m")
-                    st.write(f"**Target:** `[{at_swapped_display[0]:.3f}, {at_swapped_display[1]:.3f}, {at_swapped_display[2]:.3f}]`")
-                
-                st.divider()
-                
-                # Camera direction and view
+                eye = camera_pose['eye']
+                at = camera_pose['at']
                 direction = at - eye
                 distance = np.linalg.norm(direction)
-                direction_normalized = direction / (distance + 1e-8)
+                fov_rad = np.deg2rad(CAMERA_FOV)
+                view_size = 2 * distance * np.tan(fov_rad / 2)
                 
-                # Get actual camera distance from stats if available
-                camera_distance_m = None
-                if selected_shot['stats']:
-                    camera_distance_m = selected_shot['stats'].get('camera_distance_m')
+                info_col1, info_col2, info_col3 = st.columns(3)
                 
-                dir_col1, dir_col2 = st.columns(2)
+                with info_col1:
+                    st.markdown("### 📍 Camera Info")
+                    st.metric("Target Panel", camera_pose['target_panel'])
+                    st.metric("Distance to Target", f"{distance:.2f} m")
+                    st.metric("Field of View", f"{CAMERA_FOV}°")
                 
-                with dir_col1:
-                    st.markdown("### ➡️ Camera Direction")
-                    st.write(f"**Direction Vector:** `[{direction_normalized[0]:.3f}, {direction_normalized[1]:.3f}, {direction_normalized[2]:.3f}]`")
-                    st.write(f"**Distance to Target:** {distance:.3f} m ({distance*100:.1f} cm)")
-                    if camera_distance_m:
-                        st.write(f"**Actual Distance (from stats):** {camera_distance_m:.3f} m ({camera_distance_m*100:.1f} cm)")
-                    
-                    # Calculate angles
-                    angle_x = np.degrees(np.arctan2(direction_normalized[1], direction_normalized[0]))
-                    angle_y = np.degrees(np.arcsin(direction_normalized[2]))
-                    st.write(f"**Horizontal Angle:** {angle_x:.1f}°")
-                    st.write(f"**Vertical Angle:** {angle_y:.1f}°")
-                
-                with dir_col2:
-                    st.markdown("### 📐 Camera View")
-                    st.write(f"**Field of View:** {CAMERA_FOV}°")
-                    fov_rad = np.deg2rad(CAMERA_FOV)
-                    view_size = 2 * distance * np.tan(fov_rad / 2)
-                    st.write(f"**View Size at Target:** {view_size:.3f} m ({view_size*100:.1f} cm)")
-                    st.write(f"**Image Resolution:** {IMAGE_SIZE}×{IMAGE_SIZE} pixels")
+                with info_col2:
+                    st.markdown("### 📐 View Info")
+                    st.metric("View Size", f"{view_size:.2f} m")
+                    st.metric("Image Resolution", f"{IMAGE_SIZE}×{IMAGE_SIZE}")
                     st.write(f"**Capture Section:** {camera_pose.get('capture_section', 'N/A')}")
                 
-                st.divider()
-                
-                # Target panel information
-                st.markdown("### 🎯 Target Container Panel")
-                st.write(f"**Panel Type:** {camera_pose['target_panel']}")
-                
-                if CAMERA_POSE_GENERATOR_AVAILABLE:
-                    spec = ContainerConfig().CONTAINER_SPECS[container_type]
-                else:
-                    specs = {
-                        "20ft": (6.058, 2.591, 2.438),
-                        "40ft": (12.192, 2.591, 2.438),
-                        "40ft_hc": (12.192, 2.896, 2.438)
-                    }
-                    spec = specs.get(container_type, specs["20ft"])
-                
-                length, height, width = spec["external_y_up"]
-                
-                panel_info_col1, panel_info_col2, panel_info_col3 = st.columns(3)
-                
-                with panel_info_col1:
-                    st.metric("Container Width (X)", f"{width:.3f} m")
-                with panel_info_col2:
-                    st.metric("Container Length (Y)", f"{length:.3f} m")
-                with panel_info_col3:
-                    st.metric("Container Height (Z)", f"{height:.3f} m")
+                with info_col3:
+                    st.markdown("### 🎯 Panel Info")
+                    if CAMERA_POSE_GENERATOR_AVAILABLE:
+                        spec = ContainerConfig().CONTAINER_SPECS[container_type]
+                    else:
+                        specs = {
+                            "20ft": (6.058, 2.591, 2.438),
+                            "40ft": (12.192, 2.591, 2.438),
+                            "40ft_hc": (12.192, 2.896, 2.438)
+                        }
+                        spec = specs.get(container_type, specs["20ft"])
+                    length, height, width = spec["external_y_up"]
+                    st.metric("Container Type", container_type)
+                    st.write(f"**Dimensions:** {length:.2f}m × {width:.2f}m × {height:.2f}m")
+                    st.write(f"**(Length × Width × Height)**")
                 
                 st.divider()
                 
                 # 3D Visualization
                 st.markdown("### 🎨 3D Visualization")
-                st.caption("Interactive 3D view showing camera position (red diamond), target point (yellow circle), camera direction (red dashed line), capture area (green outline), and view frustum (cyan lines)")
                 
                 fig = create_camera_simulation_plot(camera_pose, container_type)
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Additional information
-                st.divider()
-                st.markdown("### 📝 Notes")
-                st.info("""
-                - **Camera Position (Red Diamond)**: Exact camera position calculated using CameraPoseGenerator
-                - **Camera Target (Yellow Circle)**: The point the camera is looking at on the panel
-                - **Camera Direction (Red Dashed Line)**: Vector showing where the camera is pointing
-                - **Capture Area (Green Outline)**: The actual section of the panel being captured (circular for roof, rectangular for walls)
-                - **View Frustum (Cyan Lines)**: Lines showing the camera's field of view
-                - **Container Wireframe (Gray)**: Simplified container structure for reference
-                
-                Camera poses are generated using the exact same logic as `camera_position.py`, ensuring accurate simulation.
-                """)
+                # Legend
+                st.caption("**Legend:** Red Diamond = Camera Position | Yellow Circle = Target Point | Green Outline = Capture Area | Cyan Lines = View Frustum")
 
 if __name__ == "__main__":
     main()

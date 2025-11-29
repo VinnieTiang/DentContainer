@@ -1,0 +1,9 @@
+[server]
+# Suppress file watcher errors related to PyTorch
+# This is a known harmless issue with Streamlit's file watcher inspecting torch.classes
+fileWatcherType = "poll"
+
+[logger]
+# Reduce logging level to suppress watcher errors
+level = "error"
+
