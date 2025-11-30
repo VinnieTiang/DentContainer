@@ -147,8 +147,11 @@ class DentComparisonRenderer:
         return depth
     
     def compare_depths(self, original_depth: np.ndarray, dented_depth: np.ndarray, 
-                      threshold: float = 0.01, morphology_kernel_size: int = 9,
-                      gap_fill_threshold_ratio: float = 0.5, gap_fill_distance: int = 7) -> Tuple[np.ndarray, np.ndarray]:
+                      threshold: float = 0.01, morphology_opening_size: int = 9,
+                      morphology_closing_size: int = 7,
+                      gap_fill_threshold_ratio: float = 0.5, gap_fill_distance: int = 7,
+                      internal_fill_threshold_ratio: float = 0.3, internal_fill_iterations: int = 3,
+                      min_dent_area: int = 200) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Compare depth maps to identify dented areas.
         
@@ -160,16 +163,24 @@ class DentComparisonRenderer:
             original_depth: Depth map from original container
             dented_depth: Depth map from dented container
             threshold: Depth difference threshold in meters to consider as dent
-            morphology_kernel_size: Kernel size for morphological closing operation (e.g., 3, 5, 9).
-                                   Larger values fill larger gaps. Must be odd (3, 5, 7, etc.). Default: 9.
+            morphology_opening_size: Kernel size for morphological opening operation to remove noise (default: 9).
+                                    Must be odd (3, 5, 7, etc.). Set to 0 to disable opening.
+            morphology_closing_size: Kernel size for morphological closing operation to fill gaps (default: 7).
+                                    Must be odd (3, 5, 7, etc.). Set to 0 to disable closing.
             gap_fill_threshold_ratio: Ratio of threshold to use for gap-filling near existing dents (default: 0.5).
                                      Lower values fill more gaps but may include more false positives.
             gap_fill_distance: Distance in pixels to search around existing dent regions for gap-filling (default: 7).
+            internal_fill_threshold_ratio: Lower threshold ratio for pixels inside white regions to fill black lines (default: 0.3).
+                                         Very low values fill more internal gaps but may include false positives.
+            internal_fill_iterations: Number of iterations to apply internal fill (default: 3). More iterations fill larger gaps.
+            min_dent_area: Minimum area (in pixels) required to keep a dent region (default: 200).
+                          Smaller regions are removed as noise or misclassifications.
             
         Returns:
-            Tuple of (difference_map, binary_mask)
+            Tuple of (difference_map, binary_mask, pure_binary_mask)
             - difference_map: Absolute depth difference (meters)
-            - binary_mask: Binary mask (WHITE=255 for dented areas with different depth, BLACK=0 for normal areas with same depth)
+            - binary_mask: Binary mask after morphology operations (WHITE=255 for dented areas with different depth, BLACK=0 for normal areas with same depth)
+            - pure_binary_mask: Pure binary mask before morphology operations (after gap-filling, before opening/closing)
         """
         # Ensure same dimensions
         if original_depth.shape != dented_depth.shape:
@@ -207,21 +218,79 @@ class DentComparisonRenderer:
             gap_fill_pixels = nearby_pixels & (depth_diff > gap_fill_threshold)
             binary_mask[gap_fill_pixels] = 255
         
-        # Apply morphological closing to fill small gaps and thin black lines inside dented regions
-        # Closing = dilation followed by erosion, which connects nearby white regions and fills holes
-        if morphology_kernel_size > 0:
-            # Ensure kernel size is odd (required by OpenCV)
-            if morphology_kernel_size % 2 == 0:
-                morphology_kernel_size += 1
-                logger.debug(f"Morphology kernel size adjusted to {morphology_kernel_size} (must be odd)")
+        # Internal fill step: Use an even lower threshold for pixels inside white dented regions
+        # This fills black lines and gaps within white segments by iteratively expanding dent regions
+        if internal_fill_threshold_ratio > 0 and internal_fill_iterations > 0:
+            internal_fill_threshold = threshold * internal_fill_threshold_ratio
             
-            kernel = np.ones((morphology_kernel_size, morphology_kernel_size), np.uint8)
-            binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
+            for iteration in range(internal_fill_iterations):
+                # Create a dilated mask to find pixels inside or very close to white regions
+                # Use a small kernel to gradually expand inward
+                small_kernel = np.ones((3, 3), np.uint8)
+                dilated_internal = cv2.dilate(binary_mask, small_kernel, iterations=1)
+                
+                # Find pixels that are inside white regions (surrounded by white) but not yet marked
+                # These are pixels that are within the dilated region but currently black
+                internal_pixels = (dilated_internal > 0) & (binary_mask == 0) & valid_mask
+                
+                # Use convolution to efficiently check if pixels are mostly surrounded by white
+                # Count white neighbors using a 3x3 kernel (excluding center)
+                kernel_3x3 = np.ones((3, 3), np.float32)
+                kernel_3x3[1, 1] = 0  # Don't count center pixel
+                neighbor_count = cv2.filter2D((binary_mask > 0).astype(np.float32), -1, kernel_3x3)
+                
+                # Pixels with 6+ white neighbors (out of 8) are considered mostly surrounded
+                # Fill them regardless of depth difference
+                mostly_surrounded = internal_pixels & (neighbor_count >= 6)
+                binary_mask[mostly_surrounded] = 255
+                
+                # For other internal pixels, use a very low threshold
+                remaining_internal = internal_pixels & ~mostly_surrounded
+                internal_fill_pixels = remaining_internal & (depth_diff > internal_fill_threshold)
+                binary_mask[internal_fill_pixels] = 255
+                
+                # Stop early if no new pixels were filled
+                if not (np.any(mostly_surrounded) or np.any(internal_fill_pixels)):
+                    break
         
-        # Remove thin false-positive regions using connected-component analysis
-        binary_mask = self._filter_thin_components(binary_mask)
+        # Save pure binary mask before morphology operations (after gap-filling, before opening/closing)
+        pure_binary_mask = binary_mask.copy()
         
-        return depth_diff, binary_mask
+        # Apply morphological opening (erosion followed by dilation) to remove noise
+        # Opening removes small isolated white regions and smooths boundaries
+        if morphology_opening_size > 0:
+            # Ensure kernel size is odd (required by OpenCV)
+            opening_size = morphology_opening_size
+            if opening_size % 2 == 0:
+                opening_size += 1
+                logger.debug(f"Morphology opening kernel size adjusted to {opening_size} (must be odd)")
+            
+            opening_kernel = np.ones((opening_size, opening_size), np.uint8)
+            binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, opening_kernel)
+        
+        # Apply morphological closing (dilation followed by erosion) to fill gaps and connect regions
+        # Closing fills small gaps and thin black lines inside dented regions
+        if morphology_closing_size > 0:
+            # Ensure kernel size is odd (required by OpenCV)
+            closing_size = morphology_closing_size
+            if closing_size % 2 == 0:
+                closing_size += 1
+                logger.debug(f"Morphology closing kernel size adjusted to {closing_size} (must be odd)")
+            
+            closing_kernel = np.ones((closing_size, closing_size), np.uint8)
+            binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, closing_kernel)
+        
+        # Post-morphology aggressive fill: Fill black pixels inside white regions regardless of depth
+        # This catches any remaining black lines that weren't filled by morphological operations
+        binary_mask = self._aggressive_internal_fill(binary_mask, valid_mask)
+        
+        # Fill black holes inside white dented regions
+        binary_mask = self._fill_holes(binary_mask)
+        
+        # Remove small and thin false-positive regions using connected-component analysis
+        binary_mask = self._filter_thin_components(binary_mask, min_area=min_dent_area)
+        
+        return depth_diff, binary_mask, pure_binary_mask
     
     def _depth_to_points_camera_space(self, depth: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -533,6 +602,85 @@ class DentComparisonRenderer:
         masked_depth = depth * mask
         return masked_depth
 
+    def _aggressive_internal_fill(self, binary_mask: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
+        """
+        Aggressively fill black pixels inside white dented regions regardless of depth difference.
+        
+        This method fills any black pixels that are inside or mostly surrounded by white regions,
+        treating them as part of the dented area. This is applied after morphological operations
+        to catch any remaining black lines that weren't filled.
+        
+        Args:
+            binary_mask: Input binary mask (uint8), with dent pixels = 255, background = 0
+            valid_mask: Boolean mask indicating valid pixels
+            
+        Returns:
+            Binary mask with internal black pixels filled
+        """
+        filled_mask = binary_mask.copy()
+        
+        # Use convolution to efficiently count white neighbors
+        # Count white neighbors using a 3x3 kernel (excluding center)
+        kernel_3x3 = np.ones((3, 3), np.float32)
+        kernel_3x3[1, 1] = 0  # Don't count center pixel
+        neighbor_count = cv2.filter2D((binary_mask > 0).astype(np.float32), -1, kernel_3x3)
+        
+        # Find black pixels that are inside white regions
+        # A pixel is considered "inside" if it has 5+ white neighbors (out of 8)
+        # This catches black lines and gaps within white regions
+        black_pixels = (binary_mask == 0) & valid_mask
+        mostly_surrounded = black_pixels & (neighbor_count >= 5)
+        
+        # Fill these pixels with white
+        filled_mask[mostly_surrounded] = 255
+        
+        return filled_mask
+
+    def _fill_holes(self, binary_mask: np.ndarray) -> np.ndarray:
+        """
+        Fill black holes (black regions) inside white dented regions.
+        
+        This method identifies black regions that are completely surrounded by white regions
+        and fills them with white, treating them as part of the dented area.
+        
+        Args:
+            binary_mask: Input binary mask (uint8), with dent pixels = 255, background = 0
+            
+        Returns:
+            Binary mask with holes filled (black regions inside white regions become white)
+        """
+        # Create a copy to avoid modifying the original
+        filled_mask = binary_mask.copy()
+        
+        # Invert the mask to find black regions (holes)
+        # In inverted mask: white (255) = holes/background, black (0) = dented regions
+        inverted_mask = 255 - binary_mask
+        
+        # Find connected components in the inverted mask
+        # This will identify all black regions (holes and background)
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(inverted_mask, connectivity=8)
+        
+        h, w = binary_mask.shape
+        
+        # Iterate through all components (skip label 0, which is the background in inverted mask)
+        for label in range(1, num_labels):
+            x, y, w_comp, h_comp, area = stats[label]
+            
+            # Check if this component touches any border
+            # If it touches the border, it's background, not a hole
+            touches_border = (
+                x <= 0 or y <= 0 or 
+                (x + w_comp) >= w or 
+                (y + h_comp) >= h
+            )
+            
+            # If it doesn't touch the border, it's a hole inside a white region
+            # Fill it with white (255)
+            if not touches_border:
+                filled_mask[labels == label] = 255
+        
+        return filled_mask
+
     def _filter_thin_components(self, binary_mask: np.ndarray,
                             min_area: int = 80,
                             min_thickness: int = 5,
@@ -556,24 +704,44 @@ class DentComparisonRenderer:
         # Connected components with stats
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
 
+        total_components = num_labels - 1  # Exclude background
+        removed_count = 0
+        kept_count = 0
+        removed_by_area = 0
+        removed_by_thickness = 0
+        removed_by_aspect = 0
+
         for label in range(1, num_labels):   # Skip label 0 (background)
             x, y, w, h, area = stats[label]
 
             # --- RULE 1: Remove small noisy regions ---
             if area < min_area:
+                removed_by_area += 1
+                removed_count += 1
                 continue
 
             # --- RULE 2: Remove very thin lines (1–4 px wide) ---
             if w < min_thickness or h < min_thickness:
+                removed_by_thickness += 1
+                removed_count += 1
                 continue
 
             # --- RULE 3: Remove long straight lines (very elongated) ---
             aspect_ratio = max(w / float(h), h / float(w))
             if aspect_ratio > max_aspect_ratio:
+                removed_by_aspect += 1
+                removed_count += 1
                 continue
 
             # Passed all filters → keep component
             cleaned[labels == label] = 255
+            kept_count += 1
+
+        # Log filtering statistics if components were removed
+        if removed_count > 0:
+            logger.debug(f"Component filtering: {kept_count} kept, {removed_count} removed "
+                        f"(area<{min_area}: {removed_by_area}, thin: {removed_by_thickness}, "
+                        f"elongated: {removed_by_aspect})")
 
         return cleaned
 
@@ -654,7 +822,7 @@ class DentComparisonRenderer:
                 dented_depth_masked = self._apply_mask_to_depth(dented_depth, panel_mask)
                 
                 # Compare depths using masked depth maps
-                depth_diff, dent_mask = self.compare_depths(original_depth_masked, dented_depth_masked, threshold)
+                depth_diff, dent_mask, pure_dent_mask = self.compare_depths(original_depth_masked, dented_depth_masked, threshold)
                 
                 # Render RGB for saving (needed for visual output generation later)
                 original_rgb, _ = self._render_rgb(original_mesh, pose)
@@ -728,6 +896,9 @@ class DentComparisonRenderer:
                 
                 # Save binary mask: WHITE (255) = dented areas (different depth), BLACK (0) = normal areas (same depth)
                 imageio.imwrite(shot_output_dir / f"{base_name}_dent_mask.png", dent_mask)
+                
+                # Save pure binary mask (before morphology operations)
+                imageio.imwrite(shot_output_dir / f"{base_name}_dent_mask_pure.png", pure_dent_mask)
                 
                 # Also save to dataset folder for training
                 dataset_dir = Path("output_scene_dataset")
