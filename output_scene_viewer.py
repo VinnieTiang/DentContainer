@@ -954,7 +954,6 @@ def main():
             st.metric("Dent Pixels", f"{stats.get('dent_pixels', 0):,}")
             st.metric("Dent Percentage", f"{stats.get('dent_percentage', 0):.2f}%")
             st.metric("Max Depth Diff", f"{stats.get('max_depth_diff_mm', 0):.2f} mm")
-            st.metric("Mean Depth Diff", f"{stats.get('mean_depth_diff_mm', 0):.2f} mm")
         
         # Refresh button
         st.divider()
@@ -977,8 +976,7 @@ def main():
             severity_color = 'red' if stats.get('max_depth_diff_mm', 0) > 50 else 'orange' if stats.get('max_depth_diff_mm', 0) > 20 else 'green'
             st.metric(
                 "Max Depth Difference",
-                f"{stats.get('max_depth_diff_mm', 0):.2f} mm",
-                delta=f"{stats.get('mean_depth_diff_mm', 0):.2f} mm avg"
+                f"{stats.get('max_depth_diff_mm', 0):.2f} mm"
             )
     
     # Tabs for different views
@@ -1111,19 +1109,13 @@ def main():
             
             # Depth metrics
             st.markdown("### Depth Metrics")
-            depth_metric_col1, depth_metric_col2 = st.columns(2)
-            
-            with depth_metric_col1:
-                st.metric("Max Depth Difference", f"{stats.get('max_depth_diff_mm', 0):.2f} mm")
-            with depth_metric_col2:
-                st.metric("Mean Depth Difference", f"{stats.get('mean_depth_diff_mm', 0):.2f} mm")
+            st.metric("Max Depth Difference", f"{stats.get('max_depth_diff_mm', 0):.2f} mm")
             
             # Visual indicators
             st.divider()
             st.markdown("### Severity Assessment")
             
             max_depth_mm = stats.get('max_depth_diff_mm', 0)
-            mean_depth_mm = stats.get('mean_depth_diff_mm', 0)
             dent_percentage = stats.get('dent_percentage', 0)
             
             if max_depth_mm > 50:
@@ -1180,8 +1172,7 @@ def main():
                         'Category': get_shot_category(shot_data.get('shot_name', '')),
                         'Dent Pixels': shot_data.get('dent_pixels', 0),
                         'Dent %': f"{shot_data.get('dent_percentage', 0):.2f}%",
-                        'Max Depth (mm)': f"{shot_data.get('max_depth_diff_mm', 0):.2f}",
-                        'Mean Depth (mm)': f"{shot_data.get('mean_depth_diff_mm', 0):.2f}"
+                        'Max Depth (mm)': f"{shot_data.get('max_depth_diff_mm', 0):.2f}"
                     })
                 
                 df = pd.DataFrame(shots_data)
@@ -1278,7 +1269,6 @@ def main():
                     # Statistics
                     st.markdown("#### Key Statistics")
                     st.metric("Non-zero Pixels", f"{len(depth_filtered):,}")
-                    st.metric("Mean Depth Diff", f"{np.mean(depth_filtered) * 1000:.2f} mm")
                     st.metric("Median Depth Diff", f"{np.median(depth_filtered) * 1000:.2f} mm")
                     st.metric("Max Depth Diff", f"{np.max(depth_filtered) * 1000:.2f} mm")
                     st.metric("95th Percentile", f"{np.percentile(depth_filtered, 95) * 1000:.2f} mm")
