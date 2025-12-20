@@ -148,7 +148,7 @@ class DentComparisonRenderer:
     
     def compare_depths(self, original_depth: np.ndarray, dented_depth: np.ndarray, 
                       threshold: float = 0.01, morphology_opening_size: int = 9,
-                      morphology_closing_size: int = 7,
+                      morphology_closing_size: int = 11,
                       gap_fill_threshold_ratio: float = 0.5, gap_fill_distance: int = 7,
                       internal_fill_threshold_ratio: float = 0.3, internal_fill_iterations: int = 3,
                       min_dent_area: int = 200) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
