@@ -1,4 +1,12 @@
 conda activate rgbd-opencv
+
+# Simple Dataset Generator (Recommended)
+python dataset_generator_ui.py
+
+# Or use the original workflow:
 python main.py -> choose 4
 python render_rgbd.py
-streamlit run simple_dataset_viewer.py
+
+# View results:
+streamlit run output_scene_viewer.py
+streamlit run simple_dataset_viewer.py  #old, panel only
