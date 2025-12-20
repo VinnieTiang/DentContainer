@@ -503,12 +503,22 @@ def _get_panel_info_from_shot(shot_name: str, container_type: str, eye: np.ndarr
         # Calculate which section of the door is being captured
         # Coordinate system: X=Width, Y=Length, Z=Height
         # Original at[2] is width, which maps to X in new system
-        capture_section = f"Left door panel (centered at X={at[2]:.2f}m)"
+        if 'upper' in shot_name:
+            capture_section = f"Left door panel - Upper portion (Y={at[1]:.2f}m)"
+        elif 'lower' in shot_name:
+            capture_section = f"Left door panel - Lower portion (Y={at[1]:.2f}m)"
+        else:
+            capture_section = f"Left door panel (centered at X={at[2]:.2f}m)"
         
     elif 'internal_door_right' in shot_name:
         target_panel = "Right Door Panel"
         # Original at[2] is width, which maps to X in new system
-        capture_section = f"Right door panel (centered at X={at[2]:.2f}m)"
+        if 'upper' in shot_name:
+            capture_section = f"Right door panel - Upper portion (Y={at[1]:.2f}m)"
+        elif 'lower' in shot_name:
+            capture_section = f"Right door panel - Lower portion (Y={at[1]:.2f}m)"
+        else:
+            capture_section = f"Right door panel (centered at X={at[2]:.2f}m)"
         
     elif 'internal_back_wall' in shot_name:
         target_panel = "Back Wall"

@@ -68,36 +68,144 @@ class CameraPoseGenerator:
     def _get_internal_end_wall_views(self, length: float, height: float, width: float) -> List[Dict]:
         """Generates close-up internal views of the left door, right door, and back wall."""
         poses = []
-        # Use a closer distance for door captures to get better detail
-        door_dist = self.r_config.INTERNAL_DOOR_DISTANCE  # Reduce distance by 40% to get closer
+        # Use a closer distance for door captures to maximize door panel area in frame
+        # Reduced distance to get closer and capture bigger area of door panel
+        door_dist = self.r_config.INTERNAL_DOOR_DISTANCE * 0.8  # Reduce distance by 40% to get closer
         # Randomize back wall distance to simulate human variation in positioning
         back_wall_dist = self._get_randomized_distance(self.r_config.INTERNAL_BACK_WALL_DISTANCE)
 
+        # Get door opening angle from config
+        # Note: In generation coords, door rotates around Z-axis (vertical)
+        # In camera coords (y-up): X=length, Y=height, Z=width
+        # Rotation around vertical axis in generation becomes rotation around Y-axis in camera coords
+        door_open_angle = self.c_config.DOOR_OPEN_ANGLE  # Opening angle in radians
+        
         # Door is at the front (x = length/2), spanning the width
         # Left door is on the left side (negative Z), right door is on the right side (positive Z)
         # Each door is approximately half the width
         door_half_width = width / 4.0  # Each door panel is roughly 1/4 of total width from center
         
-        # Left door view - camera positioned on the RIGHT side, facing LEFT towards left door at 90 degrees
-        # To capture left door perpendicularly: stand on right side, look left
-        left_door_center_z = -door_half_width  # Center of left door panel (negative Z = left side)
-        camera_offset_z = door_dist * 0.5  # Offset camera to opposite side for perpendicular view
-        cam_height_left = self._get_randomized_camera_height(self.r_config.INTERNAL_CAMERA_HEIGHT)
+        # Calculate door panel height (approximate, accounting for frame)
+        # Door opening height from config, but we'll use container height as reference
+        # Upper and lower target heights for maximizing door panel capture
+        door_bottom = 0.0  # Floor level
+        door_top = height  # Top of container
+        door_upper_target = door_bottom + height * 0.7  # Upper portion (70% from bottom)
+        door_lower_target = door_bottom + height * 0.3  # Lower portion (30% from bottom)
+        
+        # Door hinge positions (approximate - at the edge of door panel)
+        # Left door hinge is at left edge, right door hinge is at right edge
+        # Hinge is at door_x_pos, and at the edge of the door panel
+        door_x_pos = length / 2  # Door is at front of container
+        
+        # Calculate door center positions after rotation
+        # Left door (side=-1): rotates by -door_open_angle around vertical axis (Y-axis in camera coords)
+        # Right door (side=1): rotates by +door_open_angle around vertical axis (Y-axis in camera coords)
+        # Rotation is around the hinge point at the edge of the door
+        
+        # Left door: rotates around its left edge (hinge at z = -width/2 approximately)
+        left_hinge_z = -width / 2  # Approximate hinge position at left edge
+        left_door_center_z_closed = -door_half_width  # Center when closed
+        left_open_angle = -door_open_angle  # Left door opens inward (negative angle)
+        
+        # Right door: rotates around its right edge (hinge at z = width/2 approximately)
+        right_hinge_z = width / 2  # Approximate hinge position at right edge
+        right_door_center_z_closed = door_half_width  # Center when closed
+        right_open_angle = door_open_angle  # Right door opens inward (positive angle)
+        
+        # Calculate rotated door center positions
+        # Rotation around Y-axis (vertical) in camera coordinates
+        # Rotation formula around Y-axis: 
+        #   x' = x*cos(θ) + z*sin(θ)
+        #   z' = -x*sin(θ) + z*cos(θ)
+        # But we rotate around hinge point, so translate to hinge, rotate, translate back
+        
+        # Left door: rotate around hinge at (door_x_pos, left_hinge_z)
+        # Door center when closed: (door_x_pos, left_door_center_z_closed)
+        left_center_offset_z = left_door_center_z_closed - left_hinge_z
+        left_center_offset_x = 0  # Door center is at same X as hinge
+        # Rotate offset vector
+        left_center_offset_x_rotated = left_center_offset_x * np.cos(left_open_angle) + left_center_offset_z * np.sin(left_open_angle)
+        left_center_offset_z_rotated = -left_center_offset_x * np.sin(left_open_angle) + left_center_offset_z * np.cos(left_open_angle)
+        # Translate back to world coordinates
+        left_door_center_x_rotated = door_x_pos + left_center_offset_x_rotated
+        left_door_center_z_rotated = left_hinge_z + left_center_offset_z_rotated
+        
+        # Right door: rotate around hinge at (door_x_pos, right_hinge_z)
+        # Door center when closed: (door_x_pos, right_door_center_z_closed)
+        right_center_offset_z = right_door_center_z_closed - right_hinge_z
+        right_center_offset_x = 0  # Door center is at same X as hinge
+        # Rotate offset vector
+        right_center_offset_x_rotated = right_center_offset_x * np.cos(right_open_angle) + right_center_offset_z * np.sin(right_open_angle)
+        right_center_offset_z_rotated = -right_center_offset_x * np.sin(right_open_angle) + right_center_offset_z * np.cos(right_open_angle)
+        # Translate back to world coordinates
+        right_door_center_x_rotated = door_x_pos + right_center_offset_x_rotated
+        right_door_center_z_rotated = right_hinge_z + right_center_offset_z_rotated
+        
+        # Calculate door normal direction after rotation (perpendicular to door surface)
+        # Door normal rotates with the door around Y-axis
+        # Original normal: (1, 0, 0) pointing outward
+        # After rotation by θ around Y-axis: (cos(θ), 0, sin(θ)) - still pointing outward
+        # For camera inside container looking at door, we need inward normal (negated)
+        # Left door normal (inward): (-cos(left_open_angle), 0, -sin(left_open_angle))
+        left_door_normal_x = -np.cos(left_open_angle)
+        left_door_normal_z = -np.sin(left_open_angle)
+        
+        # Right door normal (inward): (-cos(right_open_angle), 0, -sin(right_open_angle))
+        right_door_normal_x = -np.cos(right_open_angle)
+        right_door_normal_z = -np.sin(right_open_angle)
+        
+        # Position camera along the rotated door normal direction to be perpendicular to door surface
+        # Camera should be inside container, looking at door
+        # Camera position = door_center - normal * distance (moving inward from door)
+        
+        # Left door - Upper shot
+        cam_height_left_upper = self._get_randomized_camera_height(door_upper_target)
+        # Camera positioned along rotated door normal (inward), at distance door_dist from door surface
+        # Since normal points inward, camera = door_center + normal * distance (moving inward)
+        left_cam_eye_x = left_door_center_x_rotated + left_door_normal_x * door_dist
+        left_cam_eye_z = left_door_center_z_rotated + left_door_normal_z * door_dist
+        # Target point on door surface (rotated position)
+        left_target_x = left_door_center_x_rotated
+        left_target_z = left_door_center_z_rotated
         poses.append({
-            "name": "internal_door_left",
-            "eye": torch.tensor([[length / 2 - door_dist, cam_height_left, camera_offset_z]]),  # Camera on RIGHT side (positive Z)
-            "at": torch.tensor([[length / 2, height / 2, left_door_center_z]]),  # Look at LEFT door center (negative Z)
+            "name": "internal_door_left_upper",
+            "eye": torch.tensor([[left_cam_eye_x, cam_height_left_upper, left_cam_eye_z]]),
+            "at": torch.tensor([[left_target_x, door_upper_target, left_target_z]]),
             "up": torch.tensor([[0, 1, 0]])
         })
         
-        # Right door view - camera positioned on the LEFT side, facing RIGHT towards right door at 90 degrees
-        # To capture right door perpendicularly: stand on left side, look right
-        right_door_center_z = door_half_width  # Center of right door panel (positive Z = right side)
-        cam_height_right = self._get_randomized_camera_height(self.r_config.INTERNAL_CAMERA_HEIGHT)
+        # Left door - Lower shot
+        cam_height_left_lower = self._get_randomized_camera_height(door_lower_target)
         poses.append({
-            "name": "internal_door_right",
-            "eye": torch.tensor([[length / 2 - door_dist, cam_height_right, -camera_offset_z]]),  # Camera on LEFT side (negative Z)
-            "at": torch.tensor([[length / 2, height / 2, right_door_center_z]]),  # Look at RIGHT door center (positive Z)
+            "name": "internal_door_left_lower",
+            "eye": torch.tensor([[left_cam_eye_x, cam_height_left_lower, left_cam_eye_z]]),
+            "at": torch.tensor([[left_target_x, door_lower_target, left_target_z]]),
+            "up": torch.tensor([[0, 1, 0]])
+        })
+        
+        # Right door - Upper shot
+        cam_height_right_upper = self._get_randomized_camera_height(door_upper_target)
+        # Camera positioned along rotated door normal (inward), at distance door_dist from door surface
+        # Since normal points inward, camera = door_center + normal * distance (moving inward)
+        right_cam_eye_x = right_door_center_x_rotated + right_door_normal_x * door_dist
+        right_cam_eye_z = right_door_center_z_rotated + right_door_normal_z * door_dist
+        # Target point on door surface (rotated position)
+        right_target_x = right_door_center_x_rotated
+        right_target_z = right_door_center_z_rotated
+        poses.append({
+            "name": "internal_door_right_upper",
+            "eye": torch.tensor([[right_cam_eye_x, cam_height_right_upper, right_cam_eye_z]]),
+            "at": torch.tensor([[right_target_x, door_upper_target, right_target_z]]),
+            "up": torch.tensor([[0, 1, 0]])
+        })
+        
+        # Right door - Lower shot
+        cam_height_right_lower = self._get_randomized_camera_height(door_lower_target)
+        poses.append({
+            "name": "internal_door_right_lower",
+            "eye": torch.tensor([[right_cam_eye_x, cam_height_right_lower, right_cam_eye_z]]),
+            "at": torch.tensor([[right_target_x, door_lower_target, right_target_z]]),
             "up": torch.tensor([[0, 1, 0]])
         })
 
