@@ -669,6 +669,309 @@ def render_scenes():
     print("  • Point clouds: *_original_pointcloud.ply, *_dented_pointcloud.ply")
     print("=" * 60)
 
+def generate_test_dataset():
+    """Generate complete test dataset with containers, dents, and rendered scenes"""
+    print("\n=== Generating Test Dataset ===")
+    
+    # Get user input for number of containers
+    while True:
+        try:
+            num_containers = int(input("\nEnter number of containers to generate (1-500): ").strip())
+            if 1 <= num_containers <= 500:
+                break
+            else:
+                print("Please enter a number between 1 and 500")
+        except ValueError:
+            print("Please enter a valid number")
+    
+    # Get user input for container type
+    print("\nSelect container type:")
+    print("1. 20ft container")
+    print("2. 40ft container")
+    print("3. 40ft High Cube container")
+    print("4. Random (mix of all types)")
+    
+    while True:
+        container_choice = input("Enter choice (1-4): ").strip()
+        if container_choice in ['1', '2', '3', '4']:
+            break
+        else:
+            print("Please enter a valid choice (1-4)")
+    
+    # Map choice to container type
+    container_types_map = {
+        '1': ['20ft'],
+        '2': ['40ft'],
+        '3': ['40ft_hc'],
+        '4': ['20ft', '40ft', '40ft_hc']
+    }
+    container_types = container_types_map[container_choice]
+    
+    # Get user input for number of dents
+    while True:
+        try:
+            num_dents = int(input("\nEnter number of dents per container (1-20): ").strip())
+            if 1 <= num_dents <= 20:
+                break
+            else:
+                print("Please enter a number between 1 and 20")
+        except ValueError:
+            print("Please enter a valid number")
+    
+    # Ask for depth threshold
+    try:
+        threshold_input = input("\nEnter depth difference threshold in meters (default 0.01 = 10mm): ").strip()
+        threshold = float(threshold_input) if threshold_input else 0.01
+    except ValueError:
+        threshold = 0.01
+        print(f"Invalid input, using default threshold: {threshold}m")
+    
+    # Create testset folder structure
+    testset_dir = Path("testset")
+    testset_dir.mkdir(exist_ok=True)
+    
+    complete_containers_dir = testset_dir / "complete_containers"
+    complete_containers_dented_dir = testset_dir / "complete_containers_dented"
+    output_scene_dir = testset_dir / "testset_output_scene"
+    output_scene_dataset_dir = testset_dir / "testset_output_scene_dataset"
+    
+    print(f"\n📁 Test dataset will be saved to: {testset_dir.absolute()}")
+    
+    # Step 1: Generate complete containers
+    print("\n" + "=" * 60)
+    print("STEP 1: Generating Complete Containers")
+    print("=" * 60)
+    
+    try:
+        from generate_complete_container import ShippingContainerGenerator
+        import random
+        
+        # Clean up previous testset containers
+        if complete_containers_dir.exists():
+            shutil.rmtree(complete_containers_dir)
+        complete_containers_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Created folder: {complete_containers_dir}")
+        
+        generator = ShippingContainerGenerator()
+        
+        generated_count = 0
+        
+        for i in range(num_containers):
+            # Select container type (random if multiple types available)
+            if len(container_types) > 1:
+                container_type = random.choice(container_types)
+            else:
+                container_type = container_types[0]
+            
+            # Generate filename (use absolute path)
+            output_filename = complete_containers_dir / f"container_{container_type}_{i+1:04d}.obj"
+            output_filename = output_filename.resolve()  # Make absolute
+            
+            # Ensure parent directory exists
+            output_filename.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Generate container
+            generator.generate(
+                output_path=str(output_filename),
+                container_type=container_type,
+                color=None  # Random color
+            )
+            generated_count += 1
+            print(f"  [{i+1}/{num_containers}] Generated: {output_filename.name}")
+        
+        print(f"\n✓ Generated {generated_count} complete container(s)")
+        
+    except Exception as e:
+        print(f"❌ Error generating containers: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    
+    # Step 2: Add dents to containers
+    print("\n" + "=" * 60)
+    print("STEP 2: Adding Dents to Containers")
+    print("=" * 60)
+    
+    try:
+        from generate_dents_complete import add_dents_to_container
+        
+        # Clean up previous testset dented containers
+        if complete_containers_dented_dir.exists():
+            shutil.rmtree(complete_containers_dented_dir)
+        complete_containers_dented_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Created folder: {complete_containers_dented_dir}")
+        
+        # Find all container files
+        container_files = sorted([f for f in complete_containers_dir.glob("*.obj") if "_scene.obj" not in f.name])
+        
+        processed_count = 0
+        
+        for i, input_file in enumerate(container_files, 1):
+            print(f"  [{i}/{len(container_files)}] Processing: {input_file.name}")
+            
+            # Create output filename
+            stem = input_file.stem
+            output_filename = complete_containers_dented_dir / f"{stem}_dented.obj"
+            
+            try:
+                add_dents_to_container(
+                    input_path=str(input_file),
+                    output_path=str(output_filename),
+                    num_dents=num_dents,
+                    size_range=(0.08, 0.50),
+                    depth_range=(0.02, 0.15),
+                    varied_severity=True
+                )
+                processed_count += 1
+                print(f"    ✓ Successfully processed: {output_filename.name}")
+            except Exception as e:
+                print(f"    ✗ Error processing {input_file.name}: {e}")
+                continue
+        
+        print(f"\n✓ Processed {processed_count} container(s) with dents")
+        
+    except Exception as e:
+        print(f"❌ Error adding dents: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    
+    # Step 3: Render scenes
+    print("\n" + "=" * 60)
+    print("STEP 3: Rendering Container Scenes")
+    print("=" * 60)
+    
+    try:
+        from config import ContainerConfig, RendererConfig
+        from camera_position import CameraPoseGenerator
+        from compare_dents_depth import DentComparisonRenderer
+        import re
+        import logging
+        
+        # Setup logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        
+        # Clean up previous testset scene outputs
+        if output_scene_dir.exists():
+            shutil.rmtree(output_scene_dir)
+        if output_scene_dataset_dir.exists():
+            shutil.rmtree(output_scene_dataset_dir)
+        
+        output_scene_dir.mkdir(parents=True, exist_ok=True)
+        output_scene_dataset_dir.mkdir(parents=True, exist_ok=True)
+        
+        print(f"Created folders:")
+        print(f"  {output_scene_dir}")
+        print(f"  {output_scene_dataset_dir}")
+        print(f"Depth threshold: {threshold}m ({threshold*1000:.1f}mm)")
+        
+        # Initialize comparison renderer
+        renderer_config = RendererConfig()
+        comparison_renderer = DentComparisonRenderer(
+            image_size=renderer_config.IMAGE_SIZE,
+            camera_fov=renderer_config.CAMERA_FOV
+        )
+        print("✓ DentComparisonRenderer initialized")
+        
+        # Extract container info helper function
+        def extract_container_info(filename: str):
+            """Extract container type and sample ID from filename."""
+            pattern = r'container_(20ft|40ft|40ft_hc)_(\d+)\.obj'
+            match = re.match(pattern, filename)
+            if match:
+                container_type = match.group(1)
+                sample_id = int(match.group(2))
+                return container_type, sample_id
+            return None, None
+        
+        # Find all original container files
+        original_files = sorted([f for f in complete_containers_dir.glob("*.obj") if "_scene.obj" not in f.name])
+        
+        successful = 0
+        failed = 0
+        
+        print(f"\nProcessing {len(original_files)} container pair(s)...")
+        
+        for i, original_path in enumerate(original_files, 1):
+            container_type, sample_id = extract_container_info(original_path.name)
+            
+            if container_type is None or sample_id is None:
+                print(f"[{i}/{len(original_files)}] ⚠️  Could not parse container info from: {original_path.name}")
+                failed += 1
+                continue
+            
+            # Find corresponding dented file
+            dented_path = complete_containers_dented_dir / f"container_{container_type}_{sample_id:04d}_dented.obj"
+            
+            if not dented_path.exists():
+                print(f"[{i}/{len(original_files)}] ⚠️  Dented file not found: {dented_path.name}")
+                failed += 1
+                continue
+            
+            print(f"\n[{i}/{len(original_files)}] Processing:")
+            print(f"   Original: {original_path.name}")
+            print(f"   Dented: {dented_path.name}")
+            print(f"   Container Type: {container_type}, Sample ID: {sample_id}")
+            
+            try:
+                # Process container pair with custom dataset directory
+                container_output_dir = output_scene_dir / f"container_{container_type}_{sample_id:04d}"
+                comparison_renderer.process_container_pair(
+                    original_path=original_path,
+                    dented_path=dented_path,
+                    output_dir=container_output_dir,
+                    container_type=container_type,
+                    threshold=threshold,
+                    dataset_dir=output_scene_dataset_dir,
+                    save_rgb_to_dataset=True
+                )
+                successful += 1
+                print(f"   ✓ Successfully processed container {sample_id}")
+                
+            except Exception as e:
+                print(f"   ✗ Failed to process {original_path.name}: {e}")
+                import traceback
+                traceback.print_exc()
+                failed += 1
+        
+        # Cleanup
+        try:
+            comparison_renderer.cleanup()
+        except:
+            pass
+        
+        print("\n" + "=" * 60)
+        print("SCENE RENDERING COMPLETE!")
+        print("=" * 60)
+        print(f"Successfully processed: {successful}")
+        print(f"Failed: {failed}")
+        print(f"Total: {len(original_files)}")
+        
+    except Exception as e:
+        print(f"❌ Error rendering scenes: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    
+    # Final summary
+    print("\n" + "=" * 60)
+    print("TEST DATASET GENERATION COMPLETE!")
+    print("=" * 60)
+    print(f"All outputs saved to: {testset_dir.absolute()}")
+    print(f"\nFolder structure:")
+    print(f"  • {complete_containers_dir.name}/ - Complete container meshes")
+    print(f"  • {complete_containers_dented_dir.name}/ - Dented container meshes")
+    print(f"  • {output_scene_dir.name}/ - Rendered scenes (organized by container)")
+    print(f"  • {output_scene_dataset_dir.name}/ - Dataset files (npy, masks, RGB images)")
+    print("\nDataset folder contains per shot:")
+    print("  • *_dented_depth.npy - Depth maps")
+    print("  • *_dent_mask.png - Segmentation masks")
+    print("  • *_rgb.png - RGB images")
+    print("=" * 60)
+
 def print_menu():
     """Print the main menu options"""
     print("\n" + "="*50)
@@ -681,6 +984,7 @@ def print_menu():
     print("5. Generate Complete Shipping Container")
     print("6. Add Dents to Complete Containers")
     print("7. Render Container Scenes (PyRender)")
+    print("8. Generate Test Dataset")
     print("0. Exit")
     print("="*50)
 
@@ -691,7 +995,7 @@ def main():
     
     while True:
         print_menu()
-        choice = input("\nEnter your choice (0-7): ").strip()
+        choice = input("\nEnter your choice (0-8): ").strip()
         
         if choice == '1':
             try:
@@ -757,13 +1061,21 @@ def main():
                 print(f"❌ Error during scene rendering: {e}")
                 import traceback
                 traceback.print_exc()
+        
+        elif choice == '8':
+            try:
+                generate_test_dataset()
+            except Exception as e:
+                print(f"❌ Error during test dataset generation: {e}")
+                import traceback
+                traceback.print_exc()
                 
         elif choice == '0':
             print("👋 Thank you for using the Shipping Container Generator!")
             break
             
         else:
-            print("❌ Invalid choice. Please enter 0-7.")
+            print("❌ Invalid choice. Please enter 0-8.")
         
         input("\nPress Enter to continue...")
 

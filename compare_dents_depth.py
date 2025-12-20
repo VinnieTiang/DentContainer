@@ -748,7 +748,8 @@ class DentComparisonRenderer:
     
     def process_container_pair(self, original_path: Path, dented_path: Path, 
                               output_dir: Path, container_type: str = "20ft",
-                              threshold: float = 0.01) -> Dict:
+                              threshold: float = 0.01, dataset_dir: Path = None,
+                              save_rgb_to_dataset: bool = False) -> Dict:
         """
         Process a pair of original and dented containers.
         
@@ -758,6 +759,8 @@ class DentComparisonRenderer:
             output_dir: Directory to save output images
             container_type: Container type ("20ft", "40ft", "40ft_hc")
             threshold: Depth difference threshold in meters
+            dataset_dir: Optional custom dataset directory (defaults to "output_scene_dataset")
+            save_rgb_to_dataset: Whether to save RGB images to dataset folder
             
         Returns:
             Dictionary with processing results
@@ -839,9 +842,15 @@ class DentComparisonRenderer:
                 np.save(dented_depth_path, dented_depth_masked.astype(np.float32))
                 
                 # Also save to dataset folder for training
-                dataset_dir = Path("output_scene_dataset")
+                if dataset_dir is None:
+                    dataset_dir = Path("output_scene_dataset")
                 dataset_dir.mkdir(parents=True, exist_ok=True)
-                dataset_dented_depth_path = dataset_dir / f"{base_name}_{shot_name}_dented_depth.npy"
+                
+                # Create shot folder in dataset directory
+                shot_dataset_folder = dataset_dir / f"{base_name}_{shot_name}"
+                shot_dataset_folder.mkdir(parents=True, exist_ok=True)
+                
+                dataset_dented_depth_path = shot_dataset_folder / f"{base_name}_{shot_name}_dented_depth.npy"
                 np.save(dataset_dented_depth_path, dented_depth_masked.astype(np.float32))
                 
                 # Save panel mask from RANSAC
@@ -900,11 +909,22 @@ class DentComparisonRenderer:
                 # Save pure binary mask (before morphology operations)
                 imageio.imwrite(shot_output_dir / f"{base_name}_dent_mask_pure.png", pure_dent_mask)
                 
-                # Also save to dataset folder for training
-                dataset_dir = Path("output_scene_dataset")
+                # Also save to dataset folder for training (use same shot folder created earlier)
+                if dataset_dir is None:
+                    dataset_dir = Path("output_scene_dataset")
                 dataset_dir.mkdir(parents=True, exist_ok=True)
-                dataset_dent_mask_path = dataset_dir / f"{base_name}_{shot_name}_dent_mask.png"
+                
+                # Create shot folder in dataset directory (if not already created)
+                shot_dataset_folder = dataset_dir / f"{base_name}_{shot_name}"
+                shot_dataset_folder.mkdir(parents=True, exist_ok=True)
+                
+                dataset_dent_mask_path = shot_dataset_folder / f"{base_name}_{shot_name}_dent_mask.png"
                 imageio.imwrite(dataset_dent_mask_path, dent_mask)
+                
+                # Save RGB image to dataset folder if requested
+                if save_rgb_to_dataset:
+                    dataset_rgb_path = shot_dataset_folder / f"{base_name}_{shot_name}_rgb.png"
+                    imageio.imwrite(dataset_rgb_path, dented_rgb)
                 
                 # Calculate statistics
                 dent_pixels = np.sum(dent_mask > 0)
