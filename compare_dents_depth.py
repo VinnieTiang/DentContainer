@@ -78,7 +78,16 @@ class DentComparisonRenderer:
         self.renderer_config.CAMERA_FOV = camera_fov
         self.pose_generator = CameraPoseGenerator(self.container_config, self.renderer_config)
         
+        # Pre-compute camera intrinsics from FOV (matching pyrender PerspectiveCamera)
+        # These intrinsics are used for area calculations and point cloud generation
+        fov_y_rad = np.deg2rad(camera_fov)
+        self.focal_length = (image_size / 2.0) / np.tan(fov_y_rad / 2.0)
+        self.cx = image_size / 2.0  # Principal point x
+        self.cy = image_size / 2.0  # Principal point y
+        self.fov_x_rad = fov_y_rad  # Square images: fov_x = fov_y
+        
         logger.info(f"DentComparisonRenderer initialized (image_size={image_size}, fov={camera_fov}°)")
+        logger.info(f"  Camera intrinsics: focal_length={self.focal_length:.2f}, cx={self.cx:.1f}, cy={self.cy:.1f}")
     
     def render_depth(self, mesh: trimesh.Trimesh, pose: Dict) -> np.ndarray:
         """
@@ -1337,14 +1346,8 @@ class DentComparisonRenderer:
         if not np.any(dent_pixels):
             return 0.0
         
-        # Calculate camera intrinsics from FOV
-        fov_y_rad = np.deg2rad(self.camera_fov)
-        focal_length = (h / 2.0) / np.tan(fov_y_rad / 2.0)
-        
-        # For square images, aspect ratio is 1:1
-        fov_x_rad = fov_y_rad
-        
-        # Calculate pixel size in world coordinates for each dent pixel
+        # Use pre-computed camera intrinsics from renderer (matching pyrender PerspectiveCamera)
+        # These intrinsics are derived from the same FOV used to create the camera in render_depth()
         # pixel_width = 2 * depth * tan(fov_x/2) / image_width
         # pixel_height = 2 * depth * tan(fov_y/2) / image_height
         # pixel_area = pixel_width * pixel_height
@@ -1359,9 +1362,10 @@ class DentComparisonRenderer:
         # Calculate average depth for dent region
         avg_depth = np.mean(valid_depths)
         
-        # Calculate pixel dimensions in meters at average depth
-        pixel_width_m = 2 * avg_depth * np.tan(fov_x_rad / 2.0) / w
-        pixel_height_m = 2 * avg_depth * np.tan(fov_y_rad / 2.0) / h
+        # Calculate pixel dimensions in meters at average depth using camera intrinsics
+        # Using the same FOV that was used to create the pyrender PerspectiveCamera
+        pixel_width_m = 2 * avg_depth * np.tan(self.fov_x_rad / 2.0) / w
+        pixel_height_m = 2 * avg_depth * np.tan(np.deg2rad(self.camera_fov) / 2.0) / h
         pixel_area_m2 = pixel_width_m * pixel_height_m
         
         # Calculate total area

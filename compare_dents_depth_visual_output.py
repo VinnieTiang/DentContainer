@@ -35,6 +35,12 @@ class VisualOutputGenerator:
             camera_fov: Camera field of view in degrees (must match compare_dents_depth.py)
         """
         self.camera_fov = camera_fov
+        
+        # Pre-compute camera intrinsics from FOV (matching compare_dents_depth.py)
+        # These intrinsics are used for area calculations when fallback is needed
+        fov_y_rad = np.deg2rad(camera_fov)
+        self.fov_x_rad = fov_y_rad  # Square images: fov_x = fov_y
+        
         logger.info(f"VisualOutputGenerator initialized (fov={camera_fov}°)")
     
     def load_dent_metadata(self, dented_path: Path) -> Optional[Dict]:
@@ -138,12 +144,18 @@ class VisualOutputGenerator:
         """
         Calculate dent area in cm² by converting pixel area to real-world area.
         
+        This method matches the calculation in compare_dents_depth.py for consistency.
+        Uses camera intrinsics derived from FOV (matching pyrender PerspectiveCamera).
+        
+        Note: This calculates the VISIBLE dent area in this particular shot.
+        The same dent may appear in multiple shots with different visible areas.
+        
         Args:
             dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
             depth_map: Depth map (H, W) in meters
             
         Returns:
-            Dent area in cm²
+            Dent area in cm² (visible area in this shot)
         """
         h, w = dent_mask.shape
         dent_pixels = (dent_mask > 127)
@@ -151,12 +163,8 @@ class VisualOutputGenerator:
         if not np.any(dent_pixels):
             return 0.0
         
-        # Calculate camera intrinsics from FOV
+        # Use pre-computed camera intrinsics from FOV (matching compare_dents_depth.py)
         fov_y_rad = np.deg2rad(self.camera_fov)
-        focal_length = (h / 2.0) / np.tan(fov_y_rad / 2.0)
-        
-        # For square images, aspect ratio is 1:1
-        fov_x_rad = fov_y_rad
         
         # Get depths for dent pixels
         dent_depths = depth_map[dent_pixels]
@@ -166,10 +174,12 @@ class VisualOutputGenerator:
             return 0.0
         
         # Calculate average depth for dent region
+        # Note: This matches compare_dents_depth.py's current implementation
         avg_depth = np.mean(valid_depths)
         
-        # Calculate pixel dimensions in meters at average depth
-        pixel_width_m = 2 * avg_depth * np.tan(fov_x_rad / 2.0) / w
+        # Calculate pixel dimensions in meters at average depth using camera intrinsics
+        # Using the same FOV that was used to create the pyrender PerspectiveCamera
+        pixel_width_m = 2 * avg_depth * np.tan(self.fov_x_rad / 2.0) / w
         pixel_height_m = 2 * avg_depth * np.tan(fov_y_rad / 2.0) / h
         pixel_area_m2 = pixel_width_m * pixel_height_m
         
@@ -357,13 +367,21 @@ class VisualOutputGenerator:
         outline_color = (0, 0, 0)  # Black
         
         # Prepare text labels - use statistics if available, otherwise use calculated values
+        # The area value comes from compare_dents_depth.py which uses camera intrinsics
+        # derived from the same FOV used to create the pyrender PerspectiveCamera
         if shot_statistics:
-            # Prefer max_depth_diff_mm from statistics
+            # Prefer max_depth_diff_mm from statistics (filtered value)
             max_depth_mm = shot_statistics.get('max_depth_diff_mm', dent_depth_mm)
             
-            area_text = f"Dent Area: {dent_area_cm2:.2f} cm2"
+            # Use the exact area from shot_statistics (calculated using camera intrinsics)
+            # This ensures consistency with compare_dents_depth.py's _calculate_dent_area()
+            # The area represents the VISIBLE dent area in this particular shot
+            area_cm2 = shot_statistics.get('dent_area_cm2', dent_area_cm2)
+            
+            area_text = f"Dent Area: {area_cm2:.2f} cm2"
             depth_text = f"Dent Max Depth: {max_depth_mm:.2f} mm"
         else:
+            # Fallback: use calculated or metadata values
             area_text = f"Dent Area: {dent_area_cm2:.2f} cm2"
             depth_text = f"Dent Depth: {dent_depth_mm:.2f} mm"
         
