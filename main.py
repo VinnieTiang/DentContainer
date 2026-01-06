@@ -21,6 +21,11 @@ from panel_generator import CorrugatedPanelGenerator
 from dent_generator import DentGenerator
 total_panels = 500
 
+###############################################################################
+# SINGLE BACK PANEL FUNCTIONS (Uses dent_generator.py)
+# These functions generate individual back panels, not complete containers
+###############################################################################
+
 def cleanup_panel_outputs():
     """Clean up all panel generation outputs before creating new ones"""
     print("\n🧹 Cleaning up previous panel outputs...")
@@ -167,6 +172,10 @@ def cleanup_unwanted_files():
     
     print("✓ Cleanup completed!")
 
+###############################################################################
+# SINGLE BACK PANEL: Generate random panels without dents
+# Uses: CorrugatedPanelGenerator (no dents)
+###############################################################################
 def generate_random_panels(num_panels=20):
     """Generate random corrugated panels without dents"""
     print(f"\n=== Generating {num_panels} Random Container Back Panels ===")
@@ -211,6 +220,10 @@ def generate_random_panels(num_panels=20):
     print(f"\n✓ Generated {len(panel_specs)} random container back panels in 'panel' folder")
     return panel_specs
 
+###############################################################################
+# SINGLE BACK PANEL: Generate dented panels
+# Uses: DentGenerator from dent_generator.py
+###############################################################################
 def generate_dented_panels(num_panels=total_panels):
     """Generate random corrugated container back panels with dents"""
     print(f"\n=== Generating {num_panels} Dented Container Back Panels ===")
@@ -295,6 +308,10 @@ def generate_dented_panels(num_panels=total_panels):
     print(f"\n✓ Generated {len(dented_specs)} dented container back panels in 'panel_dents' folder")
     return dented_specs
 
+###############################################################################
+# SINGLE BACK PANEL: Generate single panel with dent
+# Uses: DentGenerator from dent_generator.py
+###############################################################################
 def generate_single_panel():
     """Generate a single container back panel with default parameters"""
     print("\nGenerating single container back panel with dent...")
@@ -347,6 +364,11 @@ def generate_single_panel():
         print(f"     • Automated damage detection systems")
         print(f"     • Container inspection cameras at 2.35m distance")
         print(f"     • Quality control processes in shipping yards")
+
+###############################################################################
+# COMPLETE CONTAINER FUNCTIONS (Uses generate_dents_complete.py)
+# These functions work with full 3D container models, not just panels
+###############################################################################
 
 def cleanup_dented_containers():
     """Clean up all dented container outputs before creating new ones"""
@@ -424,6 +446,10 @@ def cleanup_scene_outputs():
     print(f"  📊 Scene output cleanup: {files_removed} files, {dirs_removed} directories removed")
     return files_removed + dirs_removed > 0
 
+###############################################################################
+# COMPLETE CONTAINER: Add dents to complete containers
+# Uses: add_dents_to_container from generate_dents_complete.py
+###############################################################################
 def generate_dented_complete_containers():
     """Add dents to complete containers from complete_containers folder"""
     print("\n=== Adding Dents to Complete Containers ===")
@@ -491,7 +517,7 @@ def generate_dented_complete_containers():
                 output_path=str(output_file),
                 num_dents=num_dents,
                 size_range=(0.08, 0.50),
-                depth_range=(0.02, 0.15),
+                depth_range=(0.02, 0.07), 
                 varied_severity=True
             )
             processed_count += 1
@@ -506,6 +532,10 @@ def generate_dented_complete_containers():
     print(f"Successfully processed {processed_count} out of {len(obj_files)} container(s)")
     print(f"All dented containers saved to: {output_folder.absolute()}")
 
+###############################################################################
+# COMPLETE CONTAINER: Render scenes with dent segmentation
+# Uses: DentComparisonRenderer (works with complete containers)
+###############################################################################
 def render_scenes():
     """Render container scenes by comparing original and dented containers to generate dent segmentation"""
     print("\n=== Rendering Container Scenes with Dent Segmentation ===")
@@ -543,16 +573,25 @@ def render_scenes():
     
     # Ask for depth threshold
     try:
-        threshold_input = input("\nEnter depth difference threshold in meters (default 0.01 = 10mm): ").strip()
-        threshold = float(threshold_input) if threshold_input else 0.01
+        threshold_input = input("\nEnter depth difference threshold in meters (default 0.035 = 35mm): ").strip()
+        threshold = float(threshold_input) if threshold_input else 0.035
     except ValueError:
-        threshold = 0.01
+        threshold = 0.035
         print(f"Invalid input, using default threshold: {threshold}m")
+    
+    # Ask for minimum area threshold
+    try:
+        min_area_input = input("\nEnter minimum dent area threshold in cm² (default 1.0): ").strip()
+        min_area_cm2 = float(min_area_input) if min_area_input else 1.0
+    except ValueError:
+        min_area_cm2 = 1.0
+        print(f"Invalid input, using default minimum area: {min_area_cm2} cm²")
     
     # Create output directory
     output_dir.mkdir(exist_ok=True)
     print(f"Output directory: {output_dir.absolute()}")
     print(f"Depth threshold: {threshold}m ({threshold*1000:.1f}mm)")
+    print(f"Minimum area threshold: {min_area_cm2} cm²")
     
     # Import required modules
     try:
@@ -636,7 +675,8 @@ def render_scenes():
                 dented_path=dented_path,
                 output_dir=container_output_dir,
                 container_type=container_type,
-                threshold=threshold
+                threshold=threshold,
+                min_area_cm2=min_area_cm2
             )
             successful += 1
             print(f"   ✓ Successfully processed container {sample_id}")
@@ -669,6 +709,11 @@ def render_scenes():
     print("  • Point clouds: *_original_pointcloud.ply, *_dented_pointcloud.ply")
     print("=" * 60)
 
+###############################################################################
+# COMPLETE CONTAINER: Full pipeline - Generate test dataset
+# Uses: ShippingContainerGenerator + add_dents_to_container (generate_dents_complete.py) + DentComparisonRenderer
+# This is the FULL PIPELINE that generates complete containers with dents
+###############################################################################
 def generate_test_dataset():
     """Generate complete test dataset with containers, dents, and rendered scenes"""
     print("\n=== Generating Test Dataset ===")
@@ -720,11 +765,19 @@ def generate_test_dataset():
     
     # Ask for depth threshold
     try:
-        threshold_input = input("\nEnter depth difference threshold in meters (default 0.01 = 10mm): ").strip()
-        threshold = float(threshold_input) if threshold_input else 0.01
+        threshold_input = input("\nEnter depth difference threshold in meters (default 0.035 = 35mm): ").strip()
+        threshold = float(threshold_input) if threshold_input else 0.035
     except ValueError:
-        threshold = 0.01
+        threshold = 0.035
         print(f"Invalid input, using default threshold: {threshold}m")
+    
+    # Ask for minimum area threshold
+    try:
+        min_area_input = input("\nEnter minimum dent area threshold in cm² (default 1.0): ").strip()
+        min_area_cm2 = float(min_area_input) if min_area_input else 1.0
+    except ValueError:
+        min_area_cm2 = 1.0
+        print(f"Invalid input, using default minimum area: {min_area_cm2} cm²")
     
     # Create testset folder structure
     testset_dir = Path("testset")
@@ -792,6 +845,7 @@ def generate_test_dataset():
     print("STEP 2: Adding Dents to Containers")
     print("=" * 60)
     
+    # Uses: generate_dents_complete.py (NOT dent_generator.py)
     try:
         from generate_dents_complete import add_dents_to_container
         
@@ -819,7 +873,7 @@ def generate_test_dataset():
                     output_path=str(output_filename),
                     num_dents=num_dents,
                     size_range=(0.08, 0.50),
-                    depth_range=(0.02, 0.15),
+                    depth_range=(0.02, 0.07), 
                     varied_severity=True
                 )
                 processed_count += 1
@@ -867,6 +921,7 @@ def generate_test_dataset():
         print(f"  {output_scene_dir}")
         print(f"  {output_scene_dataset_dir}")
         print(f"Depth threshold: {threshold}m ({threshold*1000:.1f}mm)")
+        print(f"Minimum area threshold: {min_area_cm2} cm²")
         
         # Initialize comparison renderer
         renderer_config = RendererConfig()
@@ -925,6 +980,7 @@ def generate_test_dataset():
                     output_dir=container_output_dir,
                     container_type=container_type,
                     threshold=threshold,
+                    min_area_cm2=min_area_cm2,
                     dataset_dir=output_scene_dataset_dir,
                     save_rgb_to_dataset=True
                 )
@@ -977,14 +1033,18 @@ def print_menu():
     print("\n" + "="*50)
     print("🚢 SHIPPING CONTAINER GENERATOR")
     print("="*50)
+    print("######### SINGLE BACK PANEL (uses dent_generator.py) #########")
     print("1. Generate Random Back Panels (No Dents)")
     print("2. Generate Dented Back Panels") 
     print("3. Generate Single Back Panel")
     print("4. Render RGB-D Images")
+    print("")
+    print("######### COMPLETE CONTAINER (uses generate_dents_complete.py) #########")
     print("5. Generate Complete Shipping Container")
     print("6. Add Dents to Complete Containers")
     print("7. Render Container Scenes (PyRender)")
-    print("8. Generate Test Dataset")
+    print("8. Generate Test Dataset (FULL PIPELINE)")
+    print("")
     print("0. Exit")
     print("="*50)
 
@@ -997,7 +1057,9 @@ def main():
         print_menu()
         choice = input("\nEnter your choice (0-8): ").strip()
         
+        # ######### SINGLE BACK PANEL OPTIONS #########
         if choice == '1':
+            # Uses: CorrugatedPanelGenerator (no dents)
             try:
                 num = int(input(f"Enter number of panels to generate (1-{total_panels}): "))
                 if 1 <= num <= total_panels:
@@ -1008,6 +1070,7 @@ def main():
                 print("Please enter a valid number")
                 
         elif choice == '2':
+            # Uses: DentGenerator from dent_generator.py
             try:
                 num = int(input(f"Enter number of dented panels to generate (1-{total_panels}): "))
                 if 1 <= num <= total_panels:
@@ -1018,6 +1081,7 @@ def main():
                 print("Please enter a valid number")
                 
         elif choice == '3':
+            # Uses: DentGenerator from dent_generator.py
             generate_single_panel()
             
         elif choice == '4':
@@ -1037,7 +1101,9 @@ def main():
             except Exception as e:
                 print(f"❌ Error during rendering: {e}")
         
+        # ######### COMPLETE CONTAINER OPTIONS #########
         elif choice == '5':
+            # Uses: ShippingContainerGenerator (generates complete containers)
             try:
                 from generate_complete_container import main as generate_complete_main
                 generate_complete_main()
@@ -1047,6 +1113,7 @@ def main():
                 print(f"❌ Error during container generation: {e}")
         
         elif choice == '6':
+            # Uses: add_dents_to_container from generate_dents_complete.py
             try:
                 generate_dented_complete_containers()
             except ImportError as e:
@@ -1055,6 +1122,7 @@ def main():
                 print(f"❌ Error during dent generation: {e}")
         
         elif choice == '7':
+            # Uses: DentComparisonRenderer (works with complete containers)
             try:
                 render_scenes()
             except Exception as e:
@@ -1063,6 +1131,7 @@ def main():
                 traceback.print_exc()
         
         elif choice == '8':
+            # Uses: FULL PIPELINE - ShippingContainerGenerator + generate_dents_complete.py + DentComparisonRenderer
             try:
                 generate_test_dataset()
             except Exception as e:
