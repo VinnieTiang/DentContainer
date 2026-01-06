@@ -227,6 +227,7 @@ class VisualOutputGenerator:
                               depth_diff: np.ndarray, dented_depth: np.ndarray,
                               dent_metadata: Optional[Dict] = None,
                               shot_statistics: Optional[Dict] = None,
+                              dent_segments: Optional[list] = None,
                               overlay_alpha: float = 0.2, outline_thickness: int = 2) -> np.ndarray:
         """
         Create a visual overlay showing dent regions on the background image with labels.
@@ -317,95 +318,153 @@ class VisualOutputGenerator:
         # Add text labels near the dent region
         result_uint8 = self.add_dent_labels(
             result_uint8, dent_mask, dent_area_cm2, dent_depth_mm, contours,
-            shot_statistics=shot_statistics
+            shot_statistics=shot_statistics,
+            dent_segments=dent_segments
         )
         
         return result_uint8
     
     def add_dent_labels(self, image: np.ndarray, dent_mask: np.ndarray,
                        dent_area_cm2: float, dent_depth_mm: float,
-                       contours: list, shot_statistics: Optional[Dict] = None) -> np.ndarray:
+                       contours: list, shot_statistics: Optional[Dict] = None,
+                       dent_segments: Optional[list] = None) -> np.ndarray:
         """
         Add text labels showing dent area and depth to the image.
+        If multiple segments are present, adds a label for each segment.
         
         Args:
             image: RGB image (H, W, 3)
             dent_mask: Binary mask (H, W)
-            dent_area_cm2: Dent area in cm²
-            dent_depth_mm: Dent depth in mm
+            dent_area_cm2: Dent area in cm² (fallback if segments not available)
+            dent_depth_mm: Dent depth in mm (fallback if segments not available)
             contours: List of contours from dent mask
             shot_statistics: Optional dictionary with shot statistics from summary JSON
+            dent_segments: Optional list of dent segment dictionaries with segment information
             
         Returns:
             Image with text labels added
         """
-        # Find the centroid of the largest dent region for label placement
-        if len(contours) > 0:
-            # Find largest contour
-            largest_contour = max(contours, key=cv2.contourArea)
-            M = cv2.moments(largest_contour)
-            if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-            else:
-                # Fallback to center of image
-                h, w = image.shape[:2]
-                cx, cy = w // 2, h // 2
-        else:
-            # Fallback to center of image
-            h, w = image.shape[:2]
-            cx, cy = w // 2, h // 2
-        
         # Font settings
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.6
-        font_thickness = 2
-        line_height = 25
+        font_scale = 0.5
+        font_thickness = 1
+        line_height = 20
         
         # Text color (white with black outline for visibility)
         text_color = (255, 255, 255)  # White
         outline_color = (0, 0, 0)  # Black
         
-        # Prepare text labels - use statistics if available, otherwise use calculated values
-        # The area value comes from compare_dents_depth.py which uses camera intrinsics
-        # derived from the same FOV used to create the pyrender PerspectiveCamera
-        if shot_statistics:
-            # Prefer max_depth_diff_mm from statistics (filtered value)
-            max_depth_mm = shot_statistics.get('max_depth_diff_mm', dent_depth_mm)
+        # If we have segment information, label each segment separately
+        if dent_segments and len(dent_segments) > 0:
+            # Sort segments by area (largest first) for better label placement
+            sorted_segments = sorted(dent_segments, key=lambda x: x.get('area_cm2', 0), reverse=True)
             
-            # Use the exact area from shot_statistics (calculated using camera intrinsics)
-            # This ensures consistency with compare_dents_depth.py's _calculate_dent_area()
-            # The area represents the VISIBLE dent area in this particular shot
-            area_cm2 = shot_statistics.get('dent_area_cm2', dent_area_cm2)
-            
-            area_text = f"Dent Area: {area_cm2:.2f} cm2"
-            depth_text = f"Dent Max Depth: {max_depth_mm:.2f} mm"
+            for seg_idx, segment in enumerate(sorted_segments):
+                # Get segment properties
+                centroid = segment.get('centroid', [0, 0])
+                area_cm2 = segment.get('area_cm2', 0.0)
+                max_depth_mm = segment.get('max_depth_diff_mm', 0.0)
+                
+                # Use centroid from segment data
+                cx = int(centroid[0])
+                cy = int(centroid[1])
+                
+                # Get direction information
+                direction = segment.get('direction', 'unknown')
+                direction_label = f" ({direction})" if direction != 'unknown' else ""
+                
+                # Prepare text labels for this segment
+                segment_label = f"Dent {seg_idx + 1}{direction_label}"
+                area_text = f"Area: {area_cm2:.2f} cm2"
+                depth_text = f"Depth: {max_depth_mm:.2f} mm"
+                
+                # Calculate text size to position labels
+                (label_w, label_h), _ = cv2.getTextSize(segment_label, font, font_scale, font_thickness)
+                (area_w, area_h), _ = cv2.getTextSize(area_text, font, font_scale, font_thickness)
+                (depth_w, depth_h), _ = cv2.getTextSize(depth_text, font, font_scale, font_thickness)
+                
+                max_text_w = max(label_w, area_w, depth_w)
+                
+                # Position labels near the segment centroid (above and to the right)
+                # Offset to avoid overlapping with the dent
+                label_x = min(cx + 30, image.shape[1] - max_text_w - 10)
+                label_y = max(cy - 40, (seg_idx + 1) * (line_height * 3) + 10)
+                
+                # Ensure labels don't go off-screen
+                if label_y + (line_height * 3) > image.shape[0]:
+                    label_y = max(10, image.shape[0] - (line_height * 3) - 10)
+                
+                # Draw segment number label
+                cv2.putText(image, segment_label, (label_x, label_y),
+                           font, font_scale, outline_color, font_thickness + 2, cv2.LINE_AA)
+                cv2.putText(image, segment_label, (label_x, label_y),
+                           font, font_scale, text_color, font_thickness, cv2.LINE_AA)
+                
+                # Draw area label
+                cv2.putText(image, area_text, (label_x, label_y + line_height),
+                           font, font_scale, outline_color, font_thickness + 2, cv2.LINE_AA)
+                cv2.putText(image, area_text, (label_x, label_y + line_height),
+                           font, font_scale, text_color, font_thickness, cv2.LINE_AA)
+                
+                # Draw depth label
+                cv2.putText(image, depth_text, (label_x, label_y + line_height * 2),
+                           font, font_scale, outline_color, font_thickness + 2, cv2.LINE_AA)
+                cv2.putText(image, depth_text, (label_x, label_y + line_height * 2),
+                           font, font_scale, text_color, font_thickness, cv2.LINE_AA)
         else:
-            # Fallback: use calculated or metadata values
-            area_text = f"Dent Area: {dent_area_cm2:.2f} cm2"
-            depth_text = f"Dent Depth: {dent_depth_mm:.2f} mm"
-        
-        # Calculate text size to position labels
-        (area_w, area_h), _ = cv2.getTextSize(area_text, font, font_scale, font_thickness)
-        (depth_w, depth_h), _ = cv2.getTextSize(depth_text, font, font_scale, font_thickness)
-        
-        # Position labels near the dent region (above and to the right)
-        # Offset to avoid overlapping with the dent
-        label_x = min(cx + 30, image.shape[1] - max(area_w, depth_w) - 10)
-        label_y = max(cy - 30, line_height + 10)
-        
-        # Draw text with black outline for better visibility
-        # Area label
-        cv2.putText(image, area_text, (label_x, label_y),
-                   font, font_scale, outline_color, font_thickness + 2, cv2.LINE_AA)
-        cv2.putText(image, area_text, (label_x, label_y),
-                   font, font_scale, text_color, font_thickness, cv2.LINE_AA)
-        
-        # Depth label
-        cv2.putText(image, depth_text, (label_x, label_y + line_height),
-                   font, font_scale, outline_color, font_thickness + 2, cv2.LINE_AA)
-        cv2.putText(image, depth_text, (label_x, label_y + line_height),
-                   font, font_scale, text_color, font_thickness, cv2.LINE_AA)
+            # Fallback: single label for entire dent mask (original behavior)
+            # Find the centroid of the largest dent region for label placement
+            if len(contours) > 0:
+                # Find largest contour
+                largest_contour = max(contours, key=cv2.contourArea)
+                M = cv2.moments(largest_contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                else:
+                    # Fallback to center of image
+                    h, w = image.shape[:2]
+                    cx, cy = w // 2, h // 2
+            else:
+                # Fallback to center of image
+                h, w = image.shape[:2]
+                cx, cy = w // 2, h // 2
+            
+            # Prepare text labels - use statistics if available, otherwise use calculated values
+            if shot_statistics:
+                # Prefer max_depth_diff_mm from statistics (filtered value)
+                max_depth_mm = shot_statistics.get('max_depth_diff_mm', dent_depth_mm)
+                
+                # Use the exact area from shot_statistics (calculated using camera intrinsics)
+                area_cm2 = shot_statistics.get('dent_area_cm2', dent_area_cm2)
+                
+                area_text = f"Dent Area: {area_cm2:.2f} cm2"
+                depth_text = f"Dent Max Depth: {max_depth_mm:.2f} mm"
+            else:
+                # Fallback: use calculated or metadata values
+                area_text = f"Dent Area: {dent_area_cm2:.2f} cm2"
+                depth_text = f"Dent Depth: {dent_depth_mm:.2f} mm"
+            
+            # Calculate text size to position labels
+            (area_w, area_h), _ = cv2.getTextSize(area_text, font, font_scale * 1.2, font_thickness + 1)
+            (depth_w, depth_h), _ = cv2.getTextSize(depth_text, font, font_scale * 1.2, font_thickness + 1)
+            
+            # Position labels near the dent region (above and to the right)
+            label_x = min(cx + 30, image.shape[1] - max(area_w, depth_w) - 10)
+            label_y = max(cy - 30, line_height * 2 + 10)
+            
+            # Draw text with black outline for better visibility
+            # Area label
+            cv2.putText(image, area_text, (label_x, label_y),
+                       font, font_scale * 1.2, outline_color, font_thickness + 3, cv2.LINE_AA)
+            cv2.putText(image, area_text, (label_x, label_y),
+                       font, font_scale * 1.2, text_color, font_thickness + 1, cv2.LINE_AA)
+            
+            # Depth label
+            cv2.putText(image, depth_text, (label_x, label_y + line_height * 1.5),
+                       font, font_scale * 1.2, outline_color, font_thickness + 3, cv2.LINE_AA)
+            cv2.putText(image, depth_text, (label_x, label_y + line_height * 1.5),
+                       font, font_scale * 1.2, text_color, font_thickness + 1, cv2.LINE_AA)
         
         return image
     
@@ -453,6 +512,7 @@ class VisualOutputGenerator:
                 dent_mask_path = shot_output_dir / f"{base_name}_dent_mask.png"
                 depth_diff_npy_path = shot_output_dir / f"{base_name}_depth_diff.npy"
                 dented_depth_npy_path = shot_output_dir / f"{base_name}_dented_depth.npy"
+                segment_json_path = shot_output_dir / f"{base_name}_dent_segments.json"
                 
                 # Check if all required files exist
                 missing_files = []
@@ -482,6 +542,18 @@ class VisualOutputGenerator:
                 depth_diff = np.load(depth_diff_npy_path)
                 dented_depth = np.load(dented_depth_npy_path)
                 
+                # Load dent segment information if available
+                dent_segments = None
+                if segment_json_path.exists():
+                    try:
+                        with open(segment_json_path, 'r') as f:
+                            segment_data = json.load(f)
+                            dent_segments = segment_data.get('segments', [])
+                            if dent_segments:
+                                logger.info(f"    Loaded {len(dent_segments)} dent segment(s) from JSON")
+                    except Exception as e:
+                        logger.warning(f"    Failed to load segment JSON: {e}")
+                
                 # Create visual overlay
                 visual_overlay = self.create_visual_overlay(
                     dented_rgb,
@@ -490,6 +562,7 @@ class VisualOutputGenerator:
                     dented_depth,
                     dent_metadata=dent_metadata,
                     shot_statistics=shot_stat,
+                    dent_segments=dent_segments,
                     overlay_alpha=overlay_alpha,
                     outline_thickness=outline_thickness
                 )

@@ -578,7 +578,7 @@ class DentGenerator:
         Apply a circular dent to the mesh with physics-based constraints.
         
         PHYSICS LOGIC:
-        - Dents ALWAYS push inward (never create outward spikes)
+        - Dents can push inward (negative depth) or outward (positive depth)
         - Smooth Gaussian falloff for realistic deformation
         - Respects local surface geometry
         - Prevents mesh tearing and artifacts
@@ -643,8 +643,9 @@ class DentGenerator:
         normalized_dist = distances_3d[mask] / radius
         depth_factor = np.exp(-falloff * normalized_dist ** 2)
         
-        # PHYSICS: Apply displacement along normals (inward)
-        # Negative sign = INWARD displacement (away from camera/viewer)
+        # PHYSICS: Apply displacement along normals
+        # Positive depth = INWARD displacement (negative normal direction)
+        # Negative depth = OUTWARD displacement (positive normal direction)
         displacements = -local_normals * (depth * depth_factor[:, np.newaxis])
         
         # PHYSICS CONSTRAINT: Limit maximum displacement to prevent artifacts
@@ -675,7 +676,7 @@ class DentGenerator:
         PHYSICS LOGIC:
         - Elongated deformation (sliding/scraping impacts)
         - Follows local surface curvature
-        - Always pushes inward
+        - Can push inward (positive depth) or outward (negative depth)
         
         Args:
             center: Center point of the dent
@@ -749,7 +750,9 @@ class DentGenerator:
         normalized_dist = distances_2d[mask]
         depth_factor = np.exp(-falloff * normalized_dist ** 2)
         
-        # PHYSICS: Apply displacement along normals (inward)
+        # PHYSICS: Apply displacement along normals
+        # Positive depth = INWARD displacement (negative normal direction)
+        # Negative depth = OUTWARD displacement (positive normal direction)
         displacements = -local_normals * (depth * depth_factor[:, np.newaxis])
         
         # PHYSICS CONSTRAINT: Limit maximum displacement
@@ -873,7 +876,9 @@ class DentGenerator:
         normalized_dist = distances_2d[mask]
         depth_factor = np.exp(-falloff * normalized_dist ** 2)
         
-        # PHYSICS: Apply displacement along normals (inward)
+        # PHYSICS: Apply displacement along normals
+        # Positive depth = INWARD displacement (negative normal direction)
+        # Negative depth = OUTWARD displacement (positive normal direction)
         displacements = -local_normals * (depth * depth_factor[:, np.newaxis])
         
         # PHYSICS CONSTRAINT: Limit maximum displacement
@@ -898,7 +903,7 @@ class DentGenerator:
     
     def add_dent(self, dent_type: str = 'random', 
                  size_range: Tuple[float, float] = (0.12, 0.65),
-                 depth_range: Tuple[float, float] = (0.008, 0.06),
+                 depth_range: Tuple[float, float] = (0.01, 0.07),  # Depth range: 10-70mm
                  severity: str = 'normal',
                  **kwargs):
         """
@@ -931,12 +936,19 @@ class DentGenerator:
         size = random.uniform(*size_range) * size_mult
         depth = random.uniform(*depth_range) * depth_mult
         
-        logger.debug(f"Adding {severity} {dent_type} dent at {position}, size={size:.3f}m, depth={depth:.3f}m")
+        # Randomly choose dent direction: inward (negative) or outward (positive)
+        # Inward dents are more common (70% probability), outward dents are less common (30%)
+        dent_direction = random.choices(['inward', 'outward'], weights=[0.7, 0.3])[0]
+        if dent_direction == 'outward':
+            depth = -depth  # Negative depth for outward dents
+        
+        logger.debug(f"Adding {severity} {dent_type} {dent_direction} dent at {position}, size={size:.3f}m, depth={depth:.3f}m")
         
         # Store dent specification before applying
         dent_spec = {
             'type': dent_type,
             'severity': severity,
+            'direction': dent_direction,
             'position': position.tolist(),
             'normal': normal.tolist(),
             'depth': depth,
@@ -969,7 +981,9 @@ class DentGenerator:
         
         elif dent_type == 'corner':
             # Corner dents are typically circular but deeper
-            depth = depth * random.uniform(1.2, 1.8)  # Deeper for corners (reduced from 1.8-3.0)
+            # Preserve sign (direction) when scaling depth
+            depth_sign = np.sign(depth)
+            depth = abs(depth) * random.uniform(1.2, 1.8) * depth_sign  # Deeper for corners (reduced from 1.8-3.0)
             dent_spec['radius'] = size
             dent_spec['depth'] = depth  # Update depth after modification
             dent_spec['depth_mm'] = depth * 1000
@@ -978,7 +992,9 @@ class DentGenerator:
         elif dent_type == 'surface':
             # Surface dents are wider and varied in depth
             size = size * random.uniform(1.3, 2.0)  # Wider (reduced from 1.8-3.0)
-            depth = depth * random.uniform(0.8, 1.1)  # Varied depth (reduced from 0.9-1.3)
+            # Preserve sign (direction) when scaling depth
+            depth_sign = np.sign(depth)
+            depth = abs(depth) * random.uniform(0.8, 1.1) * depth_sign  # Varied depth (reduced from 0.9-1.3)
             dent_spec['radius'] = size
             dent_spec['depth'] = depth  # Update depth after modification
             dent_spec['depth_mm'] = depth * 1000
@@ -990,7 +1006,7 @@ class DentGenerator:
     def add_multiple_dents(self, num_dents: int = 5,
                           dent_type_distribution: Dict[str, float] = None,
                           size_range: Tuple[float, float] = (0.12, 0.65),
-                          depth_range: Tuple[float, float] = (0.008, 0.06),
+                          depth_range: Tuple[float, float] = (0.01, 0.07),  # Depth range: 10-70mm
                           varied_severity: bool = True):
         """
         Add multiple dents with realistic distribution.
@@ -1057,7 +1073,7 @@ def add_dents_to_container(input_path: str, output_path: str,
                           num_dents: int = 5,
                           dent_type_distribution: Dict[str, float] = None,
                           size_range: Tuple[float, float] = (0.12, 0.65),
-                          depth_range: Tuple[float, float] = (0.008, 0.06),
+                          depth_range: Tuple[float, float] = (0.01, 0.07),  # Depth range: 10-70mm
                           varied_severity: bool = True,
                           save_specs: bool = True):
     """
@@ -1065,23 +1081,23 @@ def add_dents_to_container(input_path: str, output_path: str,
     AUTOMATICALLY EXCLUDES FLOOR PANEL from dents.
     
     PHYSICS-BASED LOGIC:
-    - Dents ALWAYS push inward (never create spikes/artifacts)
+    - Dents can push inward or outward (randomly chosen, 70% inward, 30% outward)
     - Local surface normals ensure proper deformation direction
     - Smooth Gaussian falloff for realistic material behavior
     - Displacement constraints prevent mesh tearing
     
-    MODERATE DAMAGE DEFAULTS:
+    DAMAGE DEFAULTS:
     - Size: 12-65cm (impact zones, increased area)
-    - Depth: 8-60mm (moderate depressions, reduced from 2-15cm)
-    - Varied severity creates mix of minor to moderate damage
+    - Depth: 10-70mm (varied severity creates mix of minor to severe damage)
+    - Varied severity creates mix of minor to severe damage
     
     Args:
         input_path: Path to input container OBJ file
         output_path: Path to save dented container OBJ file
         num_dents: Number of dents to add
         dent_type_distribution: Probability distribution for dent types
-        size_range: (min, max) size in meters (default: 8-50cm)
-        depth_range: (min, max) depth in meters (default: 8-60mm, reduced from 2-15cm)
+        size_range: (min, max) size in meters (default: 12-65cm)
+        depth_range: (min, max) depth in meters (default: 1-25mm, realistic for container roofs)
         varied_severity: If True, mix light and heavy damage for variety
     """
     logger.info(f"Loading container from {input_path}...")
@@ -1160,22 +1176,22 @@ def batch_process_containers(input_folder: str = "complete_containers",
                             output_folder: str = "complete_containers_dents",
                             num_dents: int = 5,
                             size_range: Tuple[float, float] = (0.12, 0.65),
-                            depth_range: Tuple[float, float] = (0.008, 0.06),
+                            depth_range: Tuple[float, float] = (0.01, 0.07),  # Depth range: 10-70mm
                             varied_severity: bool = True):
     """
     Batch process all container OBJ files in a folder with physics-based dents.
     AUTOMATICALLY EXCLUDES FLOOR PANEL from dents.
     
-    MODERATE DAMAGE DEFAULTS:
+    DAMAGE DEFAULTS:
     - Size: 12-65cm (impact zones, increased area)
-    - Depth: 8-60mm (moderate depressions, reduced from 2-15cm)
+    - Depth: 10-70mm (varied severity creates mix of minor to severe damage)
     
     Args:
         input_folder: Folder containing input container OBJ files
         output_folder: Folder to save dented containers
         num_dents: Number of dents to add per container
-        size_range: (min, max) size in meters (default: 12-65cm, increased area)
-        depth_range: (min, max) depth in meters (default: 8-60mm, reduced from 2-15cm)
+        size_range: (min, max) size in meters (default: 12-65cm)
+        depth_range: (min, max) depth in meters (default: 1-25mm, realistic for container roofs)
         varied_severity: If True, mix light and heavy damage for variety
     """
     input_path = Path(input_folder)

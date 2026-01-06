@@ -156,13 +156,13 @@ class DentComparisonRenderer:
         return depth
     
     def compare_depths(self, original_depth: np.ndarray, dented_depth: np.ndarray, 
-                      threshold: float = 0.01, morphology_opening_size: int = 9,
+                      threshold: float = 0.035, morphology_opening_size: int = 9,
                       morphology_closing_size: int = 11,
                       gap_fill_threshold_ratio: float = 0.5, gap_fill_distance: int = 7,
                       internal_fill_threshold_ratio: float = 0.3, internal_fill_iterations: int = 3,
-                      min_dent_area: int = 200) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+                      min_dent_area: int = 200) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Compare depth maps to identify dented areas.
+        Compare depth maps to identify dented areas and their direction.
         
         Compares pixel-by-pixel depth values between original and dented containers.
         Areas with different depth values (exceeding threshold) are marked as WHITE (dented).
@@ -186,10 +186,11 @@ class DentComparisonRenderer:
                           Smaller regions are removed as noise or misclassifications.
             
         Returns:
-            Tuple of (difference_map, binary_mask, pure_binary_mask)
+            Tuple of (difference_map, binary_mask, pure_binary_mask, direction_map)
             - difference_map: Absolute depth difference (meters)
             - binary_mask: Binary mask after morphology operations (WHITE=255 for dented areas with different depth, BLACK=0 for normal areas with same depth)
             - pure_binary_mask: Pure binary mask before morphology operations (after gap-filling, before opening/closing)
+            - direction_map: Direction map (1.0 = inward dent, -1.0 = outward dent, 0.0 = no dent)
         """
         # Ensure same dimensions
         if original_depth.shape != dented_depth.shape:
@@ -198,9 +199,14 @@ class DentComparisonRenderer:
             h, w = original_depth.shape
             dented_depth = cv2.resize(dented_depth, (w, h), interpolation=cv2.INTER_LINEAR)
         
+        # Calculate signed depth difference to track direction
+        # Positive = dented_depth > original_depth (inward dent, surface pushed away from camera)
+        # Negative = dented_depth < original_depth (outward dent, surface pushed toward camera)
+        signed_depth_diff = dented_depth - original_depth
+        
         # Calculate absolute depth difference between original and dented containers
         # This detects any change in depth (dents push surface inward/outward)
-        depth_diff = np.abs(dented_depth - original_depth)
+        depth_diff = np.abs(signed_depth_diff)
         
         # Identify valid pixels (both depths are valid and finite)
         valid_mask = (original_depth > 0) & (dented_depth > 0) & np.isfinite(original_depth) & np.isfinite(dented_depth)
@@ -262,6 +268,10 @@ class DentComparisonRenderer:
                 if not (np.any(mostly_surrounded) or np.any(internal_fill_pixels)):
                     break
         
+        # Create direction map: 1.0 = inward dent, -1.0 = outward dent, 0.0 = no dent
+        direction_map = np.zeros_like(signed_depth_diff, dtype=np.float32)
+        direction_map[valid_mask & (depth_diff > threshold)] = np.sign(signed_depth_diff[valid_mask & (depth_diff > threshold)])
+        
         # Save pure binary mask before morphology operations (after gap-filling, before opening/closing)
         pure_binary_mask = binary_mask.copy()
         
@@ -299,7 +309,10 @@ class DentComparisonRenderer:
         # Remove small and thin false-positive regions using connected-component analysis
         binary_mask = self._filter_thin_components(binary_mask, min_area=min_dent_area)
         
-        return depth_diff, binary_mask, pure_binary_mask
+        # Update direction map to match final binary mask (only where mask is white)
+        direction_map = direction_map * (binary_mask > 0).astype(np.float32)
+        
+        return depth_diff, binary_mask, pure_binary_mask, direction_map
     
     def _depth_to_points_camera_space(self, depth: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -757,8 +770,8 @@ class DentComparisonRenderer:
     
     def process_container_pair(self, original_path: Path, dented_path: Path, 
                               output_dir: Path, container_type: str = "20ft",
-                              threshold: float = 0.01, dataset_dir: Path = None,
-                              save_rgb_to_dataset: bool = False) -> Dict:
+                              threshold: float = 0.035, min_area_cm2: float = 1.0,
+                              dataset_dir: Path = None, save_rgb_to_dataset: bool = False) -> Dict:
         """
         Process a pair of original and dented containers.
         
@@ -768,6 +781,7 @@ class DentComparisonRenderer:
             output_dir: Directory to save output images
             container_type: Container type ("20ft", "40ft", "40ft_hc")
             threshold: Depth difference threshold in meters
+            min_area_cm2: Minimum area threshold in cm² for dent segments (default: 1.0 cm²)
             dataset_dir: Optional custom dataset directory (defaults to "output_scene_dataset")
             save_rgb_to_dataset: Whether to save RGB images to dataset folder
             
@@ -834,7 +848,21 @@ class DentComparisonRenderer:
                 dented_depth_masked = self._apply_mask_to_depth(dented_depth, panel_mask)
                 
                 # Compare depths using masked depth maps
-                depth_diff, dent_mask, pure_dent_mask = self.compare_depths(original_depth_masked, dented_depth_masked, threshold)
+                depth_diff, dent_mask, pure_dent_mask, direction_map = self.compare_depths(original_depth_masked, dented_depth_masked, threshold)
+                
+                # Filter dent segments by minimum area threshold
+                logger.info(f"    Filtering dent segments by minimum area threshold: {min_area_cm2} cm²")
+                filtered_dent_mask, dent_segments = self._filter_segments_by_area(
+                    dent_mask, dented_depth_masked, depth_diff, direction_map, min_area_cm2
+                )
+                
+                # Log filtering results
+                num_segments_before = len(self._analyze_dent_segments(dent_mask, dented_depth_masked, depth_diff, direction_map))
+                num_segments_after = len(dent_segments)
+                logger.info(f"    Segments before filtering: {num_segments_before}, after filtering: {num_segments_after}")
+                
+                # Use filtered mask for all subsequent operations
+                dent_mask = filtered_dent_mask
                 
                 # Render RGB for saving (needed for visual output generation later)
                 original_rgb, _ = self._render_rgb(original_mesh, pose)
@@ -850,16 +878,13 @@ class DentComparisonRenderer:
                 np.save(original_depth_path, original_depth_masked.astype(np.float32))
                 np.save(dented_depth_path, dented_depth_masked.astype(np.float32))
                 
-                # Also save to dataset folder for training
+                # Also save to dataset folder for training (directly in dataset_dir, no subfolders)
                 if dataset_dir is None:
                     dataset_dir = Path("output_scene_dataset")
                 dataset_dir.mkdir(parents=True, exist_ok=True)
                 
-                # Create shot folder in dataset directory
-                shot_dataset_folder = dataset_dir / f"{base_name}_{shot_name}"
-                shot_dataset_folder.mkdir(parents=True, exist_ok=True)
-                
-                dataset_dented_depth_path = shot_dataset_folder / f"{base_name}_{shot_name}_dented_depth.npy"
+                # Save files directly in dataset_dir with full name including shot_name
+                dataset_dented_depth_path = dataset_dir / f"{base_name}_{shot_name}_dented_depth.npy"
                 np.save(dataset_dented_depth_path, dented_depth_masked.astype(np.float32))
                 
                 # Save panel mask from RANSAC
@@ -918,21 +943,34 @@ class DentComparisonRenderer:
                 # Save pure binary mask (before morphology operations)
                 imageio.imwrite(shot_output_dir / f"{base_name}_dent_mask_pure.png", pure_dent_mask)
                 
-                # Also save to dataset folder for training (use same shot folder created earlier)
+                # Save dent segment information to JSON
+                segment_json_path = shot_output_dir / f"{base_name}_dent_segments.json"
+                segment_data = {
+                    'shot_name': shot_name,
+                    'container_type': container_type,
+                    'min_area_threshold_cm2': min_area_cm2,
+                    'depth_threshold_m': threshold,
+                    'depth_threshold_mm': threshold * 1000.0,
+                    'num_segments': len(dent_segments),
+                    'segments': dent_segments,
+                    'timestamp': datetime.now().isoformat()
+                }
+                with open(segment_json_path, 'w') as f:
+                    json.dump(segment_data, f, indent=2)
+                logger.info(f"    ✓ Saved dent segment information: {segment_json_path.name} ({len(dent_segments)} segments)")
+                
+                # Also save to dataset folder for training (directly in dataset_dir, no subfolders)
                 if dataset_dir is None:
                     dataset_dir = Path("output_scene_dataset")
                 dataset_dir.mkdir(parents=True, exist_ok=True)
                 
-                # Create shot folder in dataset directory (if not already created)
-                shot_dataset_folder = dataset_dir / f"{base_name}_{shot_name}"
-                shot_dataset_folder.mkdir(parents=True, exist_ok=True)
-                
-                dataset_dent_mask_path = shot_dataset_folder / f"{base_name}_{shot_name}_dent_mask.png"
+                # Save files directly in dataset_dir with full name including shot_name
+                dataset_dent_mask_path = dataset_dir / f"{base_name}_{shot_name}_dent_mask.png"
                 imageio.imwrite(dataset_dent_mask_path, dent_mask)
                 
                 # Save RGB image to dataset folder if requested
                 if save_rgb_to_dataset:
-                    dataset_rgb_path = shot_dataset_folder / f"{base_name}_{shot_name}_rgb.png"
+                    dataset_rgb_path = dataset_dir / f"{base_name}_{shot_name}_rgb.png"
                     imageio.imwrite(dataset_rgb_path, dented_rgb)
                 
                 # Calculate statistics
@@ -989,6 +1027,7 @@ class DentComparisonRenderer:
                     'max_depth_diff_m': float(filtered_max_diff_m),
                     'max_depth_diff_mm': float(filtered_max_diff_mm),
                     'dent_area_cm2': float(dent_area_cm2),
+                    'num_segments': len(dent_segments),
                     'camera_distance_m': float(camera_distance_m),
                     'camera_distance_cm': float(camera_distance_m * 100),
                     'output_dir': str(shot_output_dir)
@@ -1005,6 +1044,7 @@ class DentComparisonRenderer:
             'container_type': container_type,
             'threshold_m': threshold,
             'threshold_mm': threshold * 1000,
+            'min_area_threshold_cm2': min_area_cm2,
             'timestamp': datetime.now().isoformat(),
             'shots': results
         }
@@ -1327,6 +1367,186 @@ class DentComparisonRenderer:
         
         return float(distance)
     
+    def _calculate_segment_area(self, segment_mask: np.ndarray, depth_map: np.ndarray) -> float:
+        """
+        Calculate area of a single dent segment in cm² using camera intrinsics.
+        
+        Args:
+            segment_mask: Binary mask (H, W) where True/255 = segment pixels
+            depth_map: Depth map (H, W) in meters
+            
+        Returns:
+            Segment area in cm²
+        """
+        h, w = segment_mask.shape
+        segment_pixels = (segment_mask > 0)
+        
+        if not np.any(segment_pixels):
+            return 0.0
+        
+        # Get depths for segment pixels
+        segment_depths = depth_map[segment_pixels]
+        valid_depths = segment_depths[segment_depths > 0]
+        
+        if len(valid_depths) == 0:
+            return 0.0
+        
+        # Calculate average depth for segment region
+        avg_depth = np.mean(valid_depths)
+        
+        # Calculate pixel dimensions in meters at average depth using camera intrinsics
+        pixel_width_m = 2 * avg_depth * np.tan(self.fov_x_rad / 2.0) / w
+        pixel_height_m = 2 * avg_depth * np.tan(np.deg2rad(self.camera_fov) / 2.0) / h
+        pixel_area_m2 = pixel_width_m * pixel_height_m
+        
+        # Calculate total area
+        num_segment_pixels = np.sum(segment_pixels)
+        total_area_m2 = num_segment_pixels * pixel_area_m2
+        
+        # Convert to cm²
+        total_area_cm2 = total_area_m2 * 10000.0
+        
+        return total_area_cm2
+    
+    def _analyze_dent_segments(self, dent_mask: np.ndarray, depth_map: np.ndarray, 
+                               depth_diff: np.ndarray, direction_map: np.ndarray) -> list:
+        """
+        Analyze dent segments (connected components) and calculate properties for each.
+        
+        Args:
+            dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
+            depth_map: Depth map (H, W) in meters (dented depth)
+            depth_diff: Depth difference map (H, W) in meters
+            direction_map: Direction map (H, W) where 1.0 = inward, -1.0 = outward, 0.0 = no dent
+            
+        Returns:
+            List of dictionaries containing segment information:
+            - segment_id: Unique ID for the segment
+            - area_cm2: Area in cm²
+            - pixel_count: Number of pixels in segment
+            - centroid: (x, y) centroid in pixel coordinates
+            - bbox: Bounding box (x, y, width, height)
+            - avg_depth_m: Average depth in meters
+            - max_depth_diff_m: Maximum depth difference in meters
+            - max_depth_diff_mm: Maximum depth difference in mm
+            - direction: 'inward' or 'outward' (dominant direction in segment)
+            - direction_ratio: Ratio of inward pixels (1.0 = all inward, 0.0 = all outward)
+        """
+        h, w = dent_mask.shape
+        
+        # Find connected components (segments)
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            dent_mask, connectivity=8
+        )
+        
+        segments = []
+        
+        for label_id in range(1, num_labels):  # Skip label 0 (background)
+            # Create mask for this segment
+            segment_mask = (labels == label_id)
+            
+            # Get segment statistics
+            x, y, width, height, area_pixels = stats[label_id]
+            centroid_x, centroid_y = centroids[label_id]
+            
+            # Calculate area in cm² using camera intrinsics
+            area_cm2 = self._calculate_segment_area(segment_mask.astype(np.uint8) * 255, depth_map)
+            
+            # Get depth values for this segment
+            segment_depths = depth_map[segment_mask]
+            valid_depths = segment_depths[segment_depths > 0]
+            avg_depth_m = np.mean(valid_depths) if len(valid_depths) > 0 else 0.0
+            
+            # Get depth difference values for this segment
+            segment_depth_diffs = depth_diff[segment_mask]
+            valid_diffs = segment_depth_diffs[np.isfinite(segment_depth_diffs) & (segment_depth_diffs > 0)]
+            max_depth_diff_m = np.max(valid_diffs) if len(valid_diffs) > 0 else 0.0
+            max_depth_diff_mm = max_depth_diff_m * 1000.0
+            
+            # Determine dent direction for this segment
+            segment_directions = direction_map[segment_mask]
+            inward_pixels = np.sum(segment_directions > 0.5)  # > 0.5 means inward
+            outward_pixels = np.sum(segment_directions < -0.5)  # < -0.5 means outward
+            total_direction_pixels = inward_pixels + outward_pixels
+            
+            if total_direction_pixels > 0:
+                direction_ratio = inward_pixels / total_direction_pixels
+                # Determine dominant direction (> 50% threshold)
+                if direction_ratio > 0.5:
+                    direction = 'inward'
+                else:
+                    direction = 'outward'
+            else:
+                # Fallback: use average direction value
+                avg_direction = np.mean(segment_directions[segment_directions != 0])
+                if avg_direction > 0:
+                    direction = 'inward'
+                    direction_ratio = 1.0
+                elif avg_direction < 0:
+                    direction = 'outward'
+                    direction_ratio = 0.0
+                else:
+                    direction = 'unknown'
+                    direction_ratio = 0.5
+            
+            segment_info = {
+                'segment_id': int(label_id),
+                'area_cm2': float(area_cm2),
+                'pixel_count': int(area_pixels),
+                'centroid': [float(centroid_x), float(centroid_y)],
+                'bbox': [int(x), int(y), int(width), int(height)],
+                'avg_depth_m': float(avg_depth_m),
+                'max_depth_diff_m': float(max_depth_diff_m),
+                'max_depth_diff_mm': float(max_depth_diff_mm),
+                'direction': direction,
+                'direction_ratio': float(direction_ratio)
+            }
+            
+            segments.append(segment_info)
+        
+        return segments
+    
+    def _filter_segments_by_area(self, dent_mask: np.ndarray, depth_map: np.ndarray,
+                                 depth_diff: np.ndarray, direction_map: np.ndarray,
+                                 min_area_cm2: float = 1.0) -> Tuple[np.ndarray, list]:
+        """
+        Filter dent segments by minimum area threshold.
+        
+        Args:
+            dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
+            depth_map: Depth map (H, W) in meters
+            depth_diff: Depth difference map (H, W) in meters
+            direction_map: Direction map (H, W) where 1.0 = inward, -1.0 = outward, 0.0 = no dent
+            min_area_cm2: Minimum area threshold in cm² (default: 1.0 cm²)
+            
+        Returns:
+            Tuple of (filtered_mask, filtered_segments_info):
+            - filtered_mask: Binary mask with only segments above threshold
+            - filtered_segments_info: List of segment information for kept segments
+        """
+        # Analyze all segments
+        all_segments = self._analyze_dent_segments(dent_mask, depth_map, depth_diff, direction_map)
+        
+        # Filter segments by area
+        filtered_segments = [seg for seg in all_segments if seg['area_cm2'] >= min_area_cm2]
+        
+        # Create new mask with only filtered segments
+        filtered_mask = np.zeros_like(dent_mask)
+        
+        if len(filtered_segments) > 0:
+            # Find connected components again
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+                dent_mask, connectivity=8
+            )
+            
+            # Keep only segments that passed the area filter
+            for seg in filtered_segments:
+                segment_id = seg['segment_id']
+                if segment_id < num_labels:
+                    filtered_mask[labels == segment_id] = 255
+        
+        return filtered_mask, filtered_segments
+    
     def _calculate_dent_area(self, dent_mask: np.ndarray, depth_map: np.ndarray) -> float:
         """
         Calculate dent area in cm² by counting pixels where mask = 1 (dented) 
@@ -1377,7 +1597,7 @@ class DentComparisonRenderer:
         
         return total_area_cm2
     
-    def _extract_dent_depths(self, depth_diff: np.ndarray, dent_mask: np.ndarray, threshold: float = 0.01) -> np.ndarray:
+    def _extract_dent_depths(self, depth_diff: np.ndarray, dent_mask: np.ndarray, threshold: float = 0.035) -> np.ndarray:
         """
         Extract depth difference values for pixels identified as dents.
         
@@ -1541,8 +1761,10 @@ Examples:
     parser.add_argument('--container-type', type=str, default='20ft', 
                        choices=['20ft', '40ft', '40ft_hc'],
                        help='Container type')
-    parser.add_argument('--threshold', type=float, default=0.01,
-                       help='Depth difference threshold in meters (default: 0.01 = 10mm)')
+    parser.add_argument('--threshold', type=float, default=0.035,
+                       help='Depth difference threshold in meters (default: 0.035 = 35mm)')
+    parser.add_argument('--min-area-cm2', type=float, default=1.0,
+                       help='Minimum dent area threshold in cm² (default: 1.0 cm²)')
     parser.add_argument('--image-size', type=int, default=512,
                        help='Image size for rendering (default: 512)')
     parser.add_argument('--batch', action='store_true',
@@ -1606,7 +1828,8 @@ Examples:
                     dented_file,
                     container_output_dir,
                     container_type=container_type,
-                    threshold=args.threshold
+                    threshold=args.threshold,
+                    min_area_cm2=args.min_area_cm2
                 )
         
         else:
@@ -1631,7 +1854,8 @@ Examples:
                 dented_path,
                 output_dir,
                 container_type=args.container_type,
-                threshold=args.threshold
+                threshold=args.threshold,
+                min_area_cm2=args.min_area_cm2
             )
     
     finally:
