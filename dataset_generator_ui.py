@@ -252,7 +252,7 @@ def add_dents():
                 output_path=str(output_file),
                 num_dents=num_dents,
                 size_range=(0.08, 0.50),
-                depth_range=(0.02, 0.15),
+                depth_range=(0.02, 0.07), 
                 varied_severity=True
             )
             successful += 1
@@ -315,20 +315,35 @@ def render_scenes():
     
     while True:
         try:
-            threshold_input = input("\nEnter depth difference threshold in meters (default 0.01 = 10mm): ").strip()
-            threshold = float(threshold_input) if threshold_input else 0.01
+            threshold_input = input("\nEnter depth difference threshold in meters (default 0.035 = 35mm): ").strip()
+            threshold = float(threshold_input) if threshold_input else 0.035
             if 0.001 <= threshold <= 0.1:
                 break
             else:
                 print("Please enter a value between 0.001 and 0.1")
         except ValueError:
-            threshold = 0.01
+            threshold = 0.035
             print(f"Invalid input, using default threshold: {threshold}m")
+            break
+    
+    # Ask for minimum area threshold
+    while True:
+        try:
+            min_area_input = input("\nEnter minimum dent area threshold in cm² (default 1.0): ").strip()
+            min_area_cm2 = float(min_area_input) if min_area_input else 1.0
+            if 0.0 <= min_area_cm2 <= 1000.0:
+                break
+            else:
+                print("Please enter a value between 0.0 and 1000.0")
+        except ValueError:
+            min_area_cm2 = 1.0
+            print(f"Invalid input, using default minimum area: {min_area_cm2} cm²")
             break
     
     output_dir.mkdir(exist_ok=True)
     print(f"\n📐 Configuration:")
     print(f"  Depth threshold: {threshold}m ({threshold*1000:.1f}mm)")
+    print(f"  Minimum area threshold: {min_area_cm2} cm²")
     print(f"  Output directory: {output_dir.absolute()}")
     
     # Setup logging
@@ -386,7 +401,8 @@ def render_scenes():
                 dented_path=dented_path,
                 output_dir=container_output_dir,
                 container_type=container_type,
-                threshold=threshold
+                threshold=threshold,
+                min_area_cm2=min_area_cm2
             )
             successful += 1
             print(f"    ✓ Successfully processed container {sample_id}")
