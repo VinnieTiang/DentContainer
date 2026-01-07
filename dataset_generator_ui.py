@@ -102,56 +102,68 @@ def check_status():
     print("-" * 70)
 
 
-def generate_containers():
-    """Generate complete containers"""
+def generate_containers(num_containers=None, container_types=None, cleanup_containers=None):
+    """Generate complete containers
+    
+    Args:
+        num_containers: Number of containers to generate (optional, will prompt if None)
+        container_types: List of container types ['20ft', '40ft', '40ft_hc'] (optional, will prompt if None)
+        cleanup_containers: Whether to cleanup previous containers (optional, will prompt if None)
+    """
     print("\n🚀 Step 1: Generate Complete Containers")
     print("-" * 70)
     
     try:
         from generate_complete_container import ShippingContainerGenerator
         import shutil
+        import random
     except ImportError as e:
         print(f"❌ Error: Could not import required modules: {e}")
         return False
     
-    # Get user input
-    while True:
-        try:
-            num_containers = int(input("\nEnter number of containers to generate (1-500): ").strip())
-            if 1 <= num_containers <= 500:
+    # Get user input if not provided
+    if num_containers is None:
+        while True:
+            try:
+                num_containers = int(input("\nEnter number of containers to generate (1-500): ").strip())
+                if 1 <= num_containers <= 500:
+                    break
+                else:
+                    print("Please enter a number between 1 and 500")
+            except ValueError:
+                print("Please enter a valid number")
+    
+    if container_types is None:
+        print("\nSelect container type:")
+        print("  [1] 20ft container")
+        print("  [2] 40ft container")
+        print("  [3] 40ft High Cube container")
+        print("  [4] Random (mix of all types)")
+        
+        while True:
+            choice = input("Enter choice (1-4): ").strip()
+            if choice in ['1', '2', '3', '4']:
                 break
             else:
-                print("Please enter a number between 1 and 500")
-        except ValueError:
-            print("Please enter a valid number")
-    
-    print("\nSelect container type:")
-    print("  [1] 20ft container")
-    print("  [2] 40ft container")
-    print("  [3] 40ft High Cube container")
-    print("  [4] Random (mix of all types)")
-    
-    while True:
-        choice = input("Enter choice (1-4): ").strip()
-        if choice in ['1', '2', '3', '4']:
-            break
-        else:
-            print("Please enter a valid choice (1-4)")
-    
-    # Map choice to container types
-    container_types_map = {
-        '1': ['20ft'],
-        '2': ['40ft'],
-        '3': ['40ft_hc'],
-        '4': ['20ft', '40ft', '40ft_hc']
-    }
-    container_types = container_types_map[choice]
+                print("Please enter a valid choice (1-4)")
+        
+        # Map choice to container types
+        container_types_map = {
+            '1': ['20ft'],
+            '2': ['40ft'],
+            '3': ['40ft_hc'],
+            '4': ['20ft', '40ft', '40ft_hc']
+        }
+        container_types = container_types_map[choice]
     
     # Clean up previous outputs
     output_dir = Path("complete_containers")
     if output_dir.exists():
-        cleanup = input("\nClean up previous containers? (y/n): ").strip().lower()
-        if cleanup == 'y':
+        if cleanup_containers is None:
+            cleanup = input("\nClean up previous containers? (y/n): ").strip().lower()
+            cleanup_containers = (cleanup == 'y')
+        
+        if cleanup_containers:
             shutil.rmtree(output_dir)
             print("  ✓ Cleaned up previous containers")
     
@@ -164,9 +176,9 @@ def generate_containers():
     
     successful = 0
     for i in range(num_containers):
-        # Select container type
+        # Select container type (random if multiple types available)
         if len(container_types) > 1:
-            container_type = container_types[i % len(container_types)]
+            container_type = random.choice(container_types)
         else:
             container_type = container_types[0]
         
@@ -176,7 +188,8 @@ def generate_containers():
         try:
             generator.generate(
                 output_path=str(output_path),
-                container_type=container_type
+                container_type=container_type,
+                color=None  # Random color
             )
             successful += 1
             print(f"  [{i+1}/{num_containers}] ✓ Generated: {output_filename}")
@@ -189,8 +202,13 @@ def generate_containers():
     return successful > 0
 
 
-def add_dents():
-    """Add dents to containers"""
+def add_dents(num_dents=None, cleanup_dented=None):
+    """Add dents to containers
+    
+    Args:
+        num_dents: Number of dents per container (optional, will prompt if None)
+        cleanup_dented: Whether to cleanup previous dented containers (optional, will prompt if None)
+    """
     print("\n🔨 Step 2: Add Dents to Containers")
     print("-" * 70)
     
@@ -215,22 +233,26 @@ def add_dents():
     
     print(f"Found {len(obj_files)} container file(s)")
     
-    # Get user input
-    while True:
-        try:
-            num_dents = int(input("\nEnter number of dents per container (1-20): ").strip())
-            if 1 <= num_dents <= 20:
-                break
-            else:
-                print("Please enter a number between 1 and 20")
-        except ValueError:
-            print("Please enter a valid number")
+    # Get user input if not provided
+    if num_dents is None:
+        while True:
+            try:
+                num_dents = int(input("\nEnter number of dents per container (1-20): ").strip())
+                if 1 <= num_dents <= 20:
+                    break
+                else:
+                    print("Please enter a number between 1 and 20")
+            except ValueError:
+                print("Please enter a valid number")
     
     # Clean up previous outputs
     output_folder = Path("complete_containers_dented")
     if output_folder.exists():
-        cleanup = input("\nClean up previous dented containers? (y/n): ").strip().lower()
-        if cleanup == 'y':
+        if cleanup_dented is None:
+            cleanup = input("\nClean up previous dented containers? (y/n): ").strip().lower()
+            cleanup_dented = (cleanup == 'y')
+        
+        if cleanup_dented:
             shutil.rmtree(output_folder)
             print("  ✓ Cleaned up previous dented containers")
     
@@ -266,8 +288,14 @@ def add_dents():
     return successful > 0
 
 
-def render_scenes():
-    """Render container scenes"""
+def render_scenes(threshold=None, min_area_cm2=None, cleanup_scenes=None):
+    """Render container scenes
+    
+    Args:
+        threshold: Depth difference threshold in meters (optional, will prompt if None)
+        min_area_cm2: Minimum dent area threshold in cm² (optional, will prompt if None)
+        cleanup_scenes: Whether to cleanup previous scene outputs (optional, will prompt if None)
+    """
     print("\n🎬 Step 3: Render Container Scenes")
     print("-" * 70)
     
@@ -306,39 +334,44 @@ def render_scenes():
     
     print(f"Found {len(original_files)} container file(s)")
     
-    # Get user input
-    cleanup_choice = input("\nClean up previous scene outputs? (y/n): ").strip().lower()
-    if cleanup_choice == 'y':
+    # Get user input if not provided
+    if cleanup_scenes is None:
+        cleanup_choice = input("\nClean up previous scene outputs? (y/n): ").strip().lower()
+        cleanup_scenes = (cleanup_choice == 'y')
+    
+    if cleanup_scenes:
         if output_dir.exists():
             shutil.rmtree(output_dir)
             print("  ✓ Cleaned up previous scene outputs")
     
-    while True:
-        try:
-            threshold_input = input("\nEnter depth difference threshold in meters (default 0.035 = 35mm): ").strip()
-            threshold = float(threshold_input) if threshold_input else 0.035
-            if 0.001 <= threshold <= 0.1:
+    if threshold is None:
+        while True:
+            try:
+                threshold_input = input("\nEnter depth difference threshold in meters (default 0.035 = 35mm): ").strip()
+                threshold = float(threshold_input) if threshold_input else 0.035
+                if 0.001 <= threshold <= 0.1:
+                    break
+                else:
+                    print("Please enter a value between 0.001 and 0.1")
+            except ValueError:
+                threshold = 0.035
+                print(f"Invalid input, using default threshold: {threshold}m")
                 break
-            else:
-                print("Please enter a value between 0.001 and 0.1")
-        except ValueError:
-            threshold = 0.035
-            print(f"Invalid input, using default threshold: {threshold}m")
-            break
     
     # Ask for minimum area threshold
-    while True:
-        try:
-            min_area_input = input("\nEnter minimum dent area threshold in cm² (default 1.0): ").strip()
-            min_area_cm2 = float(min_area_input) if min_area_input else 1.0
-            if 0.0 <= min_area_cm2 <= 1000.0:
+    if min_area_cm2 is None:
+        while True:
+            try:
+                min_area_input = input("\nEnter minimum dent area threshold in cm² (default 1.0): ").strip()
+                min_area_cm2 = float(min_area_input) if min_area_input else 1.0
+                if 0.0 <= min_area_cm2 <= 1000.0:
+                    break
+                else:
+                    print("Please enter a value between 0.0 and 1000.0")
+            except ValueError:
+                min_area_cm2 = 1.0
+                print(f"Invalid input, using default minimum area: {min_area_cm2} cm²")
                 break
-            else:
-                print("Please enter a value between 0.0 and 1000.0")
-        except ValueError:
-            min_area_cm2 = 1.0
-            print(f"Invalid input, using default minimum area: {min_area_cm2} cm²")
-            break
     
     output_dir.mkdir(exist_ok=True)
     print(f"\n📐 Configuration:")
@@ -432,22 +465,126 @@ def render_scenes():
 
 
 def run_full_pipeline():
-    """Run the complete pipeline"""
+    """Run the complete pipeline - collects all inputs upfront before starting generation"""
     print("\n🚀 Running Full Pipeline")
+    print("=" * 70)
+    print("\n📝 Please provide all inputs before generation starts:")
+    print("-" * 70)
+    
+    # Collect all inputs upfront
+    # 1. Number of containers
+    while True:
+        try:
+            num_containers = int(input("\nEnter number of containers to generate (1-500): ").strip())
+            if 1 <= num_containers <= 500:
+                break
+            else:
+                print("Please enter a number between 1 and 500")
+        except ValueError:
+            print("Please enter a valid number")
+    
+    # 2. Container type
+    print("\nSelect container type:")
+    print("  [1] 20ft container")
+    print("  [2] 40ft container")
+    print("  [3] 40ft High Cube container")
+    print("  [4] Random (mix of all types)")
+    
+    while True:
+        choice = input("Enter choice (1-4): ").strip()
+        if choice in ['1', '2', '3', '4']:
+            break
+        else:
+            print("Please enter a valid choice (1-4)")
+    
+    # Map choice to container types
+    container_types_map = {
+        '1': ['20ft'],
+        '2': ['40ft'],
+        '3': ['40ft_hc'],
+        '4': ['20ft', '40ft', '40ft_hc']
+    }
+    container_types = container_types_map[choice]
+    
+    # 3. Number of dents
+    while True:
+        try:
+            num_dents = int(input("\nEnter number of dents per container (1-20): ").strip())
+            if 1 <= num_dents <= 20:
+                break
+            else:
+                print("Please enter a number between 1 and 20")
+        except ValueError:
+            print("Please enter a valid number")
+    
+    # 4. Depth threshold
+    while True:
+        try:
+            threshold_input = input("\nEnter depth difference threshold in meters (default 0.035 = 35mm): ").strip()
+            threshold = float(threshold_input) if threshold_input else 0.035
+            if 0.001 <= threshold <= 0.1:
+                break
+            else:
+                print("Please enter a value between 0.001 and 0.1")
+        except ValueError:
+            threshold = 0.035
+            print(f"Invalid input, using default threshold: {threshold}m")
+            break
+    
+    # 5. Minimum area threshold
+    while True:
+        try:
+            min_area_input = input("\nEnter minimum dent area threshold in cm² (default 1.0): ").strip()
+            min_area_cm2 = float(min_area_input) if min_area_input else 1.0
+            if 0.0 <= min_area_cm2 <= 1000.0:
+                break
+            else:
+                print("Please enter a value between 0.0 and 1000.0")
+        except ValueError:
+            min_area_cm2 = 1.0
+            print(f"Invalid input, using default minimum area: {min_area_cm2} cm²")
+            break
+    
+    # 6. Cleanup options
+    cleanup_containers = input("\nClean up previous containers? (y/n): ").strip().lower() == 'y'
+    cleanup_dented = input("Clean up previous dented containers? (y/n): ").strip().lower() == 'y'
+    cleanup_scenes = input("Clean up previous scene outputs? (y/n): ").strip().lower() == 'y'
+    
+    # Display summary
+    print("\n" + "=" * 70)
+    print("📋 Configuration Summary:")
+    print("-" * 70)
+    print(f"  • Number of containers: {num_containers}")
+    print(f"  • Container type(s): {', '.join(container_types)}")
+    print(f"  • Number of dents per container: {num_dents}")
+    print(f"  • Depth threshold: {threshold}m ({threshold*1000:.1f}mm)")
+    print(f"  • Minimum area threshold: {min_area_cm2} cm²")
+    print(f"  • Cleanup containers: {'Yes' if cleanup_containers else 'No'}")
+    print(f"  • Cleanup dented containers: {'Yes' if cleanup_dented else 'No'}")
+    print(f"  • Cleanup scene outputs: {'Yes' if cleanup_scenes else 'No'}")
+    print("=" * 70)
+    
+    confirm = input("\nProceed with generation? (y/n): ").strip().lower()
+    if confirm != 'y':
+        print("❌ Pipeline cancelled by user")
+        return
+    
+    print("\n" + "=" * 70)
+    print("🚀 Starting Generation Pipeline...")
     print("=" * 70)
     
     # Step 1: Generate containers
-    if not generate_containers():
+    if not generate_containers(num_containers=num_containers, container_types=container_types, cleanup_containers=cleanup_containers):
         print("\n❌ Pipeline stopped: Failed to generate containers")
         return
     
     # Step 2: Add dents
-    if not add_dents():
+    if not add_dents(num_dents=num_dents, cleanup_dented=cleanup_dented):
         print("\n❌ Pipeline stopped: Failed to add dents")
         return
     
     # Step 3: Render scenes
-    if not render_scenes():
+    if not render_scenes(threshold=threshold, min_area_cm2=min_area_cm2, cleanup_scenes=cleanup_scenes):
         print("\n❌ Pipeline stopped: Failed to render scenes")
         return
     
