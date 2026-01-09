@@ -517,7 +517,7 @@ def generate_dented_complete_containers():
                 output_path=str(output_file),
                 num_dents=num_dents,
                 size_range=(0.08, 0.50),
-                depth_range=(0.02, 0.07), 
+                depth_range=(0.04, 0.07), 
                 varied_severity=True
             )
             processed_count += 1
