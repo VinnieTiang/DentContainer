@@ -384,13 +384,15 @@ def add_dents(num_dents=None, cleanup_dented=None):
     return successful > 0
 
 
-def render_scenes(threshold=None, min_area_cm2=None, cleanup_scenes=None):
+def render_scenes(threshold=None, min_area_cm2=None, cleanup_scenes=None, is_testset=False):
     """Render container scenes
     
     Args:
         threshold: Depth difference threshold in meters (optional, will prompt if None)
         min_area_cm2: Minimum dent area threshold in cm² (optional, will prompt if None)
         cleanup_scenes: Whether to cleanup previous scene outputs (optional, will prompt if None)
+        is_testset: If True, saves additional files (raw depth, RGB) for testset generation.
+                   If False (regular rendering), only saves _dent_mask.png and _dented_depth.npy
     """
     print("\n🎬 Step 3: Render Container Scenes")
     print("-" * 70)
@@ -578,7 +580,7 @@ def render_scenes(threshold=None, min_area_cm2=None, cleanup_scenes=None):
                 threshold=threshold,
                 min_area_cm2=min_area_cm2,
                 dataset_dir=dataset_dir,
-                save_rgb_to_dataset=True
+                is_testset=is_testset  # Use testset mode if True (saves RGB and raw depth)
             )
             successful += 1
             print(f"    ✓ Successfully processed container {sample_id}")
@@ -729,8 +731,8 @@ def run_full_pipeline():
         print("\n❌ Pipeline stopped: Failed to add dents")
         return
     
-    # Step 3: Render scenes
-    if not render_scenes(threshold=threshold, min_area_cm2=min_area_cm2, cleanup_scenes=cleanup_scenes):
+    # Step 3: Render scenes (use testset mode for full pipeline to save RGB and raw depth)
+    if not render_scenes(threshold=threshold, min_area_cm2=min_area_cm2, cleanup_scenes=cleanup_scenes, is_testset=True):
         print("\n❌ Pipeline stopped: Failed to render scenes")
         return
     

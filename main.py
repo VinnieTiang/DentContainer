@@ -676,7 +676,8 @@ def render_scenes():
                 output_dir=container_output_dir,
                 container_type=container_type,
                 threshold=threshold,
-                min_area_cm2=min_area_cm2
+                min_area_cm2=min_area_cm2,
+                is_testset=False  # Regular rendering: only save mask and depth
             )
             successful += 1
             print(f"   ✓ Successfully processed container {sample_id}")
@@ -982,7 +983,7 @@ def generate_test_dataset():
                     threshold=threshold,
                     min_area_cm2=min_area_cm2,
                     dataset_dir=output_scene_dataset_dir,
-                    save_rgb_to_dataset=True
+                    is_testset=True  # Testset generation: save all files including RGB and raw depth
                 )
                 successful += 1
                 print(f"   ✓ Successfully processed container {sample_id}")
