@@ -363,6 +363,8 @@ class VisualOutputGenerator:
                 # Get segment properties
                 centroid = segment.get('centroid', [0, 0])
                 area_cm2 = segment.get('area_cm2', 0.0)
+                width_cm = segment.get('width_cm', 0.0)
+                length_cm = segment.get('length_cm', 0.0)
                 max_depth_mm = segment.get('max_depth_diff_mm', 0.0)
                 
                 # Use centroid from segment data
@@ -376,23 +378,25 @@ class VisualOutputGenerator:
                 # Prepare text labels for this segment
                 segment_label = f"Dent {seg_idx + 1}{direction_label}"
                 area_text = f"Area: {area_cm2:.2f} cm2"
+                dimensions_text = f"Dimension: {width_cm:.1f}cm x {length_cm:.1f}cm"
                 depth_text = f"Depth: {max_depth_mm:.2f} mm"
                 
                 # Calculate text size to position labels
                 (label_w, label_h), _ = cv2.getTextSize(segment_label, font, font_scale, font_thickness)
                 (area_w, area_h), _ = cv2.getTextSize(area_text, font, font_scale, font_thickness)
+                (dimensions_w, dimensions_h), _ = cv2.getTextSize(dimensions_text, font, font_scale, font_thickness)
                 (depth_w, depth_h), _ = cv2.getTextSize(depth_text, font, font_scale, font_thickness)
                 
-                max_text_w = max(label_w, area_w, depth_w)
+                max_text_w = max(label_w, area_w, dimensions_w, depth_w)
                 
                 # Position labels near the segment centroid (above and to the right)
                 # Offset to avoid overlapping with the dent
                 label_x = min(cx + 30, image.shape[1] - max_text_w - 10)
-                label_y = max(cy - 40, (seg_idx + 1) * (line_height * 3) + 10)
+                label_y = max(cy - 40, (seg_idx + 1) * (line_height * 4) + 10)
                 
                 # Ensure labels don't go off-screen
-                if label_y + (line_height * 3) > image.shape[0]:
-                    label_y = max(10, image.shape[0] - (line_height * 3) - 10)
+                if label_y + (line_height * 4) > image.shape[0]:
+                    label_y = max(10, image.shape[0] - (line_height * 4) - 10)
                 
                 # Draw segment number label
                 cv2.putText(image, segment_label, (label_x, label_y),
@@ -406,10 +410,16 @@ class VisualOutputGenerator:
                 cv2.putText(image, area_text, (label_x, label_y + line_height),
                            font, font_scale, text_color, font_thickness, cv2.LINE_AA)
                 
-                # Draw depth label
-                cv2.putText(image, depth_text, (label_x, label_y + line_height * 2),
+                # Draw dimensions label (width x length)
+                cv2.putText(image, dimensions_text, (label_x, label_y + line_height * 2),
                            font, font_scale, outline_color, font_thickness + 2, cv2.LINE_AA)
-                cv2.putText(image, depth_text, (label_x, label_y + line_height * 2),
+                cv2.putText(image, dimensions_text, (label_x, label_y + line_height * 2),
+                           font, font_scale, text_color, font_thickness, cv2.LINE_AA)
+                
+                # Draw depth label
+                cv2.putText(image, depth_text, (label_x, label_y + line_height * 3),
+                           font, font_scale, outline_color, font_thickness + 2, cv2.LINE_AA)
+                cv2.putText(image, depth_text, (label_x, label_y + line_height * 3),
                            font, font_scale, text_color, font_thickness, cv2.LINE_AA)
         else:
             # Fallback: single label for entire dent mask (original behavior)

@@ -328,10 +328,16 @@ class DentComparisonRenderer:
         """
         height, width = depth.shape
         
-        # Calculate camera intrinsics from FOV
-        fov_y_rad = np.deg2rad(self.camera_fov)
-        focal_length = (height / 2.0) / np.tan(fov_y_rad / 2.0)
-        cx, cy = width / 2.0, height / 2.0
+        # Use pre-computed camera intrinsics if depth map matches expected size
+        # Otherwise calculate from actual dimensions (should be rare)
+        if height == self.image_size and width == self.image_size:
+            focal_length = self.focal_length
+            cx, cy = self.cx, self.cy
+        else:
+            # Fallback: calculate for non-standard depth map dimensions
+            fov_y_rad = np.deg2rad(self.camera_fov)
+            focal_length = (height / 2.0) / np.tan(fov_y_rad / 2.0)
+            cx, cy = width / 2.0, height / 2.0
         
         # Create pixel coordinates
         u, v = np.meshgrid(np.arange(width), np.arange(height))
@@ -771,7 +777,8 @@ class DentComparisonRenderer:
     def process_container_pair(self, original_path: Path, dented_path: Path, 
                               output_dir: Path, container_type: str = "20ft",
                               threshold: float = 0.035, min_area_cm2: float = 1.0,
-                              dataset_dir: Path = None, save_rgb_to_dataset: bool = False) -> Dict:
+                              dataset_dir: Path = None, save_rgb_to_dataset: bool = False,
+                              is_testset: bool = False) -> Dict:
         """
         Process a pair of original and dented containers.
         
@@ -783,7 +790,9 @@ class DentComparisonRenderer:
             threshold: Depth difference threshold in meters
             min_area_cm2: Minimum area threshold in cm² for dent segments (default: 1.0 cm²)
             dataset_dir: Optional custom dataset directory (defaults to "output_scene_dataset")
-            save_rgb_to_dataset: Whether to save RGB images to dataset folder
+            save_rgb_to_dataset: Whether to save RGB images to dataset folder (deprecated, use is_testset instead)
+            is_testset: If True, saves additional files (raw depth, RGB) for testset generation.
+                       If False (regular rendering), only saves _dent_mask.png and _dented_depth.npy
             
         Returns:
             Dictionary with processing results
@@ -828,6 +837,26 @@ class DentComparisonRenderer:
                 original_depth = self.render_depth(original_mesh, pose)
                 dented_depth = self.render_depth(dented_mesh, pose)
                 
+                # Save raw depth maps (before RANSAC masking) - these are the raw camera captures
+                shot_output_dir = output_dir / shot_name
+                shot_output_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Save raw depth maps to output_scene folder
+                original_depth_raw_path = shot_output_dir / f"{base_name}_original_depth_raw.npy"
+                dented_depth_raw_path = shot_output_dir / f"{base_name}_dented_depth_raw.npy"
+                np.save(original_depth_raw_path, original_depth.astype(np.float32))
+                np.save(dented_depth_raw_path, dented_depth.astype(np.float32))
+                
+                # Save raw dented depth map to dataset folder ONLY for testset generation
+                if is_testset:
+                    if dataset_dir is None:
+                        dataset_dir = Path("output_scene_dataset")
+                    dataset_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    dataset_dented_depth_raw_path = dataset_dir / f"{base_name}_{shot_name}_dented_depth_raw.npy"
+                    np.save(dataset_dented_depth_raw_path, dented_depth.astype(np.float32))
+                    logger.info(f"    ✓ Saved raw dented depth map (before RANSAC): {base_name}_{shot_name}_dented_depth_raw.npy")
+                
                 # Apply Gaussian smoothing to flatten corrugation pattern before RANSAC
                 # Automatically tune sigma based on depth variance
                 logger.info(f"    Applying Gaussian smoothing with adaptive sigma to flatten corrugation pattern...")
@@ -847,30 +876,42 @@ class DentComparisonRenderer:
                 original_depth_masked = self._apply_mask_to_depth(original_depth, panel_mask)
                 dented_depth_masked = self._apply_mask_to_depth(dented_depth, panel_mask)
                 
-                # Compare depths using masked depth maps
-                depth_diff, dent_mask, pure_dent_mask, direction_map = self.compare_depths(original_depth_masked, dented_depth_masked, threshold)
+                # Compare depths using masked depth maps to detect dent locations
+                # This initial comparison identifies where dents are
+                depth_diff_initial, dent_mask, pure_dent_mask, direction_map = self.compare_depths(original_depth_masked, dented_depth_masked, threshold)
                 
                 # Filter dent segments by minimum area threshold
                 logger.info(f"    Filtering dent segments by minimum area threshold: {min_area_cm2} cm²")
                 filtered_dent_mask, dent_segments = self._filter_segments_by_area(
-                    dent_mask, dented_depth_masked, depth_diff, direction_map, min_area_cm2
+                    dent_mask, dented_depth_masked, depth_diff_initial, direction_map, min_area_cm2
                 )
                 
                 # Log filtering results
-                num_segments_before = len(self._analyze_dent_segments(dent_mask, dented_depth_masked, depth_diff, direction_map))
+                num_segments_before = len(self._analyze_dent_segments(dent_mask, dented_depth_masked, depth_diff_initial, direction_map))
                 num_segments_after = len(dent_segments)
                 logger.info(f"    Segments before filtering: {num_segments_before}, after filtering: {num_segments_after}")
                 
                 # Use filtered mask for all subsequent operations
                 dent_mask = filtered_dent_mask
                 
+                # Recalculate depth difference relative to median panel depth
+                # This provides more accurate depth measurement by comparing to the "normal" panel surface
+                logger.info(f"    Calculating depth relative to median panel depth...")
+                median_panel_depth = self._calculate_median_panel_depth(dented_depth_masked, dent_mask, panel_mask)
+                logger.info(f"    Median panel depth: {median_panel_depth:.4f}m ({median_panel_depth*1000:.2f}mm)")
+                depth_diff = self._calculate_depth_diff_from_median(dented_depth_masked, dent_mask, panel_mask)
+                
+                # Re-analyze segments with median-based depth_diff for accurate depth measurements
+                dent_segments = self._analyze_dent_segments(dent_mask, dented_depth_masked, depth_diff, direction_map)
+                # Filter segments again by area threshold (using median-based depth_diff)
+                filtered_segments = [seg for seg in dent_segments if seg['area_cm2'] >= min_area_cm2]
+                dent_segments = filtered_segments
+                
                 # Render RGB for saving (needed for visual output generation later)
                 original_rgb, _ = self._render_rgb(original_mesh, pose)
                 dented_rgb, _ = self._render_rgb(dented_mesh, pose)
                 
-                # Save outputs
-                shot_output_dir = output_dir / shot_name
-                shot_output_dir.mkdir(parents=True, exist_ok=True)
+                # Save outputs (shot_output_dir already created above when saving raw depth maps)
                 
                 # Save masked depth maps (after RANSAC panel detection)
                 original_depth_path = shot_output_dir / f"{base_name}_original_depth.npy"
@@ -959,19 +1000,20 @@ class DentComparisonRenderer:
                     json.dump(segment_data, f, indent=2)
                 logger.info(f"    ✓ Saved dent segment information: {segment_json_path.name} ({len(dent_segments)} segments)")
                 
-                # Also save to dataset folder for training (directly in dataset_dir, no subfolders)
+                # Save to dataset folder for training (directly in dataset_dir, no subfolders)
                 if dataset_dir is None:
                     dataset_dir = Path("output_scene_dataset")
                 dataset_dir.mkdir(parents=True, exist_ok=True)
                 
-                # Save files directly in dataset_dir with full name including shot_name
+                # Always save dent mask and masked depth for training (both regular and testset)
                 dataset_dent_mask_path = dataset_dir / f"{base_name}_{shot_name}_dent_mask.png"
                 imageio.imwrite(dataset_dent_mask_path, dent_mask)
                 
-                # Save RGB image to dataset folder if requested
-                if save_rgb_to_dataset:
+                # Save RGB image to dataset folder ONLY for testset generation
+                if is_testset or save_rgb_to_dataset:
                     dataset_rgb_path = dataset_dir / f"{base_name}_{shot_name}_rgb.png"
                     imageio.imwrite(dataset_rgb_path, dented_rgb)
+                    logger.info(f"    ✓ Saved RGB image to dataset: {base_name}_{shot_name}_rgb.png")
                 
                 # Calculate statistics
                 dent_pixels = np.sum(dent_mask > 0)
@@ -998,12 +1040,12 @@ class DentComparisonRenderer:
                     filtered_max_diff_m = raw_max_diff_m
                     filtered_max_diff_mm = raw_max_diff_mm
                     logger.info(f"    ✓ Dent mask: {dent_pixels} pixels ({dent_percentage:.1f}%)")
-                    logger.info(f"    ✓ Raw max depth difference: {raw_max_diff_mm:.2f}mm")
-                    logger.info(f"    ✓ Filtered max depth difference: {filtered_max_diff_mm:.2f}mm (using raw value, filtered exceeded 200mm)")
+                    logger.info(f"    ✓ Max depth (vs median panel): {raw_max_diff_mm:.2f}mm")
+                    logger.info(f"    ✓ Filtered max depth: {filtered_max_diff_mm:.2f}mm (using raw value, filtered exceeded 200mm)")
                 else:
                     logger.info(f"    ✓ Dent mask: {dent_pixels} pixels ({dent_percentage:.1f}%)")
-                    logger.info(f"    ✓ Raw max depth difference: {raw_max_diff_mm:.2f}mm")
-                    logger.info(f"    ✓ Filtered max depth difference: {filtered_max_diff_mm:.2f}mm")
+                    logger.info(f"    ✓ Max depth (vs median panel): {raw_max_diff_mm:.2f}mm")
+                    logger.info(f"    ✓ Filtered max depth: {filtered_max_diff_mm:.2f}mm")
                 
                 # Calculate camera distance from panel
                 # For regular shots: distance from camera to panel
@@ -1020,7 +1062,10 @@ class DentComparisonRenderer:
                     'dent_pixels': int(dent_pixels),
                     'total_pixels': int(total_pixels),
                     'dent_percentage': float(dent_percentage),
-                    # Raw statistics (before filtering)
+                    # Depth measurement reference (median panel depth)
+                    'median_panel_depth_m': float(median_panel_depth),
+                    'median_panel_depth_mm': float(median_panel_depth * 1000),
+                    # Raw statistics (before filtering) - depth relative to median panel
                     'max_depth_diff_m_raw': float(raw_max_diff_m),
                     'max_depth_diff_mm_raw': float(raw_max_diff_mm),
                     # Filtered statistics (after outlier removal, uses raw value if filtered exceeds 200mm)
@@ -1160,10 +1205,16 @@ class DentComparisonRenderer:
         """
         height, width = depth.shape
         
-        # Calculate camera intrinsics from FOV
-        fov_y_rad = np.deg2rad(self.camera_fov)
-        focal_length = (height / 2.0) / np.tan(fov_y_rad / 2.0)
-        cx, cy = width / 2.0, height / 2.0
+        # Use pre-computed camera intrinsics if depth map matches expected size
+        # Otherwise calculate from actual dimensions (should be rare)
+        if height == self.image_size and width == self.image_size:
+            focal_length = self.focal_length
+            cx, cy = self.cx, self.cy
+        else:
+            # Fallback: calculate for non-standard depth map dimensions
+            fov_y_rad = np.deg2rad(self.camera_fov)
+            focal_length = (height / 2.0) / np.tan(fov_y_rad / 2.0)
+            cx, cy = width / 2.0, height / 2.0
         
         # Create pixel coordinates
         u, v = np.meshgrid(np.arange(width), np.arange(height))
@@ -1395,8 +1446,9 @@ class DentComparisonRenderer:
         avg_depth = np.mean(valid_depths)
         
         # Calculate pixel dimensions in meters at average depth using camera intrinsics
+        # Using pre-computed FOV (square images: fov_x = fov_y)
         pixel_width_m = 2 * avg_depth * np.tan(self.fov_x_rad / 2.0) / w
-        pixel_height_m = 2 * avg_depth * np.tan(np.deg2rad(self.camera_fov) / 2.0) / h
+        pixel_height_m = 2 * avg_depth * np.tan(self.fov_x_rad / 2.0) / h
         pixel_area_m2 = pixel_width_m * pixel_height_m
         
         # Calculate total area
@@ -1407,6 +1459,65 @@ class DentComparisonRenderer:
         total_area_cm2 = total_area_m2 * 10000.0
         
         return total_area_cm2
+    
+    def _calculate_segment_dimensions(self, segment_mask: np.ndarray, depth_map: np.ndarray, 
+                                     bbox: Tuple[int, int, int, int]) -> Tuple[float, float]:
+        """
+        Calculate width and length of a dent segment in cm using camera intrinsics.
+        
+        Uses the bounding box dimensions and converts to real-world measurements
+        based on the average depth of the segment.
+        
+        Args:
+            segment_mask: Binary mask (H, W) where True/255 = segment pixels
+            depth_map: Depth map (H, W) in meters
+            bbox: Bounding box as (x, y, width_pixels, height_pixels)
+            
+        Returns:
+            Tuple of (width_cm, length_cm) in centimeters
+        """
+        h, w = segment_mask.shape
+        x, y, width_px, height_px = bbox
+        
+        segment_pixels = (segment_mask > 0)
+        
+        if not np.any(segment_pixels) or width_px == 0 or height_px == 0:
+            return 0.0, 0.0
+        
+        # Get depths for segment pixels
+        segment_depths = depth_map[segment_pixels]
+        valid_depths = segment_depths[segment_depths > 0]
+        
+        if len(valid_depths) == 0:
+            return 0.0, 0.0
+        
+        # Calculate average depth for segment region
+        avg_depth = np.mean(valid_depths)
+        
+        # Calculate pixel dimensions in meters at average depth using camera intrinsics
+        # Using pre-computed FOV (square images: fov_x = fov_y)
+        pixel_width_m = 2 * avg_depth * np.tan(self.fov_x_rad / 2.0) / w
+        pixel_height_m = 2 * avg_depth * np.tan(self.fov_x_rad / 2.0) / h
+        
+        # Calculate real-world dimensions from bounding box
+        # Note: width_px and height_px are in image coordinates
+        # We need to determine which is actually width vs length based on orientation
+        # For simplicity, use the larger dimension as length and smaller as width
+        width_m = width_px * pixel_width_m
+        height_m = height_px * pixel_height_m
+        
+        # Determine width (smaller) and length (larger)
+        if width_m >= height_m:
+            length_m = width_m
+            width_m = height_m
+        else:
+            length_m = height_m
+        
+        # Convert to cm
+        width_cm = width_m * 100.0
+        length_cm = length_m * 100.0
+        
+        return width_cm, length_cm
     
     def _analyze_dent_segments(self, dent_mask: np.ndarray, depth_map: np.ndarray, 
                                depth_diff: np.ndarray, direction_map: np.ndarray) -> list:
@@ -1452,6 +1563,11 @@ class DentComparisonRenderer:
             # Calculate area in cm² using camera intrinsics
             area_cm2 = self._calculate_segment_area(segment_mask.astype(np.uint8) * 255, depth_map)
             
+            # Calculate width and length in cm using camera intrinsics
+            width_cm, length_cm = self._calculate_segment_dimensions(
+                segment_mask.astype(np.uint8) * 255, depth_map, (x, y, width, height)
+            )
+            
             # Get depth values for this segment
             segment_depths = depth_map[segment_mask]
             valid_depths = segment_depths[segment_depths > 0]
@@ -1492,6 +1608,8 @@ class DentComparisonRenderer:
             segment_info = {
                 'segment_id': int(label_id),
                 'area_cm2': float(area_cm2),
+                'width_cm': float(width_cm),
+                'length_cm': float(length_cm),
                 'pixel_count': int(area_pixels),
                 'centroid': [float(centroid_x), float(centroid_y)],
                 'bbox': [int(x), int(y), int(width), int(height)],
@@ -1583,9 +1701,9 @@ class DentComparisonRenderer:
         avg_depth = np.mean(valid_depths)
         
         # Calculate pixel dimensions in meters at average depth using camera intrinsics
-        # Using the same FOV that was used to create the pyrender PerspectiveCamera
+        # Using pre-computed FOV (square images: fov_x = fov_y)
         pixel_width_m = 2 * avg_depth * np.tan(self.fov_x_rad / 2.0) / w
-        pixel_height_m = 2 * avg_depth * np.tan(np.deg2rad(self.camera_fov) / 2.0) / h
+        pixel_height_m = 2 * avg_depth * np.tan(self.fov_x_rad / 2.0) / h
         pixel_area_m2 = pixel_width_m * pixel_height_m
         
         # Calculate total area
@@ -1693,12 +1811,77 @@ class DentComparisonRenderer:
         
         return float(max_depth_m)
     
-    def _calculate_dent_depth(self, depth_diff: np.ndarray, dent_mask: np.ndarray) -> float:
+    def _calculate_median_panel_depth(self, depth_map: np.ndarray, dent_mask: np.ndarray, 
+                                     panel_mask: Optional[np.ndarray] = None) -> float:
         """
-        Calculate maximum dent depth in mm.
+        Calculate median depth of the panel region, excluding dent areas.
+        
+        This represents the "normal" panel surface depth, which is used as reference
+        for measuring dent depth.
         
         Args:
-            depth_diff: Depth difference map (H, W) in meters
+            depth_map: Depth map (H, W) in meters
+            dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
+            panel_mask: Optional panel mask (H, W) where True/1.0 = panel region.
+                       If None, uses entire image.
+            
+        Returns:
+            Median panel depth in meters
+        """
+        # Combine masks: panel region excluding dent areas
+        if panel_mask is not None:
+            # Panel region (excluding dents)
+            panel_region = (panel_mask > 0) & (dent_mask == 0)
+        else:
+            # Use entire image excluding dents
+            panel_region = (dent_mask == 0)
+        
+        # Get valid panel depths (non-zero, finite, excluding dents)
+        panel_depths = depth_map[panel_region & (depth_map > 0) & np.isfinite(depth_map)]
+        
+        if len(panel_depths) == 0:
+            # Fallback: use median of all valid depths if no panel region found
+            valid_depths = depth_map[(depth_map > 0) & np.isfinite(depth_map) & (dent_mask == 0)]
+            if len(valid_depths) == 0:
+                logger.warning("No valid panel depths found for median calculation, using mean of all depths")
+                valid_depths = depth_map[(depth_map > 0) & np.isfinite(depth_map)]
+                if len(valid_depths) == 0:
+                    return 0.0
+            return float(np.median(valid_depths))
+        
+        return float(np.median(panel_depths))
+    
+    def _calculate_depth_diff_from_median(self, depth_map: np.ndarray, dent_mask: np.ndarray,
+                                          panel_mask: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Calculate depth difference map relative to median panel depth.
+        
+        Args:
+            depth_map: Depth map (H, W) in meters (dented depth)
+            dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
+            panel_mask: Optional panel mask (H, W) where True/1.0 = panel region
+            
+        Returns:
+            Depth difference map (H, W) in meters, where values represent
+            deviation from median panel depth
+        """
+        median_depth = self._calculate_median_panel_depth(depth_map, dent_mask, panel_mask)
+        
+        # Calculate absolute depth difference from median
+        depth_diff = np.abs(depth_map - median_depth)
+        
+        # Set invalid depths to 0
+        valid_mask = (depth_map > 0) & np.isfinite(depth_map)
+        depth_diff[~valid_mask] = 0.0
+        
+        return depth_diff
+    
+    def _calculate_dent_depth(self, depth_diff: np.ndarray, dent_mask: np.ndarray) -> float:
+        """
+        Calculate maximum dent depth in mm relative to median panel depth.
+        
+        Args:
+            depth_diff: Depth difference map (H, W) in meters (relative to median panel depth)
             dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
             
         Returns:
