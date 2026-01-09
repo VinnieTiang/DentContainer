@@ -102,6 +102,52 @@ def check_status():
     print("-" * 70)
 
 
+def get_starting_container_number(container_dir: Path) -> int:
+    """Find the highest container number in the directory and return the next number to use.
+    
+    Args:
+        container_dir: Path to directory containing container files
+        
+    Returns:
+        Starting container number (1 if no containers found, max_number + 1 if containers exist)
+    """
+    import re
+    if not container_dir.exists():
+        return 1
+    
+    existing_files = list(container_dir.glob("container_*.obj"))
+    max_number = 0
+    for file in existing_files:
+        # Extract number from filename like "container_20ft_0001.obj"
+        match = re.search(r'container_\w+_(\d{4})\.obj', file.name)
+        if match:
+            number = int(match.group(1))
+            max_number = max(max_number, number)
+    
+    return max_number + 1 if max_number > 0 else 1
+
+
+def filter_containers_by_start_number(container_files: list, start_number: int) -> list:
+    """Filter container files to only include those >= start_number.
+    
+    Args:
+        container_files: List of container file paths
+        start_number: Minimum container number to include
+        
+    Returns:
+        Filtered list of container files
+    """
+    import re
+    filtered = []
+    for file in container_files:
+        match = re.search(r'container_\w+_(\d{4})\.obj', file.name)
+        if match:
+            number = int(match.group(1))
+            if number >= start_number:
+                filtered.append(file)
+    return sorted(filtered, key=lambda x: int(re.search(r'container_\w+_(\d{4})\.obj', x.name).group(1)))
+
+
 def generate_containers(num_containers=None, container_types=None, cleanup_containers=None):
     """Generate complete containers
     
@@ -169,6 +215,14 @@ def generate_containers(num_containers=None, container_types=None, cleanup_conta
     
     output_dir.mkdir(exist_ok=True)
     
+    # Determine starting container number
+    # If cleanup was skipped, find the highest existing container number and continue from there
+    start_number = 1
+    if not cleanup_containers:
+        start_number = get_starting_container_number(output_dir)
+        if start_number > 1:
+            print(f"  ℹ Continuing from container number {start_number:04d}")
+    
     # Generate containers
     generator = ShippingContainerGenerator()
     print(f"\n📦 Generating {num_containers} container(s)...")
@@ -182,7 +236,8 @@ def generate_containers(num_containers=None, container_types=None, cleanup_conta
         else:
             container_type = container_types[0]
         
-        output_filename = f"container_{container_type}_{i+1:04d}.obj"
+        container_number = start_number + i
+        output_filename = f"container_{container_type}_{container_number:04d}.obj"
         output_path = output_dir / output_filename
         
         try:
@@ -226,12 +281,51 @@ def add_dents(num_dents=None, cleanup_dented=None):
         return False
     
     # Find all container files
-    obj_files = sorted([f for f in input_folder.glob("*.obj") if "_scene.obj" not in f.name])
-    if not obj_files:
+    all_obj_files = sorted([f for f in input_folder.glob("*.obj") if "_scene.obj" not in f.name])
+    if not all_obj_files:
         print("❌ Error: No container files found!")
         return False
     
-    print(f"Found {len(obj_files)} container file(s)")
+    # Setup output folder
+    output_folder = Path("complete_containers_dented")
+    
+    # Determine starting container number based on cleanup choice
+    start_number = 1
+    if not cleanup_dented:
+        # Find the highest container number that already has a dented version
+        import re
+        output_folder.mkdir(exist_ok=True)
+        if output_folder.exists():
+            existing_dented = list(output_folder.glob("container_*_dented.obj"))
+            max_dented_number = 0
+            for file in existing_dented:
+                match = re.search(r'container_\w+_(\d{4})_dented\.obj', file.name)
+                if match:
+                    number = int(match.group(1))
+                    max_dented_number = max(max_dented_number, number)
+            
+            # Also check original containers to find the highest number
+            max_original_number = 0
+            for file in all_obj_files:
+                match = re.search(r'container_\w+_(\d{4})\.obj', file.name)
+                if match:
+                    number = int(match.group(1))
+                    max_original_number = max(max_original_number, number)
+            
+            # Start from the next number after the highest dented container
+            # But also consider if there are newer original containers
+            start_number = max(max_dented_number + 1, 1)
+            if start_number > 1:
+                print(f"  ℹ Processing containers starting from number {start_number:04d}")
+    
+    # Filter containers to only process those >= start_number
+    obj_files = filter_containers_by_start_number(all_obj_files, start_number)
+    
+    if not obj_files:
+        print(f"  ℹ No containers to process (all containers < {start_number:04d} already have dented versions)")
+        return True
+    
+    print(f"Found {len(all_obj_files)} total container file(s), processing {len(obj_files)} container(s) from number {start_number:04d}")
     
     # Get user input if not provided
     if num_dents is None:
@@ -245,8 +339,7 @@ def add_dents(num_dents=None, cleanup_dented=None):
             except ValueError:
                 print("Please enter a valid number")
     
-    # Clean up previous outputs
-    output_folder = Path("complete_containers_dented")
+    # Clean up previous outputs (output_folder already defined earlier)
     if output_folder.exists():
         if cleanup_dented is None:
             cleanup = input("\nClean up previous dented containers? (y/n): ").strip().lower()
@@ -258,12 +351,15 @@ def add_dents(num_dents=None, cleanup_dented=None):
     
     output_folder.mkdir(exist_ok=True)
     
+    # Process containers (already filtered by start_number)
+    containers_to_process = obj_files
+    
     # Process containers
-    print(f"\n🔨 Processing {len(obj_files)} container(s)...")
+    print(f"\n🔨 Processing {len(containers_to_process)} container(s)...")
     print("-" * 70)
     
     successful = 0
-    for i, input_file in enumerate(obj_files, 1):
+    for i, input_file in enumerate(containers_to_process, 1):
         stem = input_file.stem
         output_filename = f"{stem}_dented.obj"
         output_file = output_folder / output_filename
@@ -278,12 +374,12 @@ def add_dents(num_dents=None, cleanup_dented=None):
                 varied_severity=True
             )
             successful += 1
-            print(f"  [{i}/{len(obj_files)}] ✓ Processed: {output_filename}")
+            print(f"  [{i}/{len(containers_to_process)}] ✓ Processed: {output_filename}")
         except Exception as e:
-            print(f"  [{i}/{len(obj_files)}] ✗ Failed {input_file.name}: {e}")
+            print(f"  [{i}/{len(containers_to_process)}] ✗ Failed {input_file.name}: {e}")
     
     print("-" * 70)
-    print(f"✓ Successfully processed {successful}/{len(obj_files)} container(s)")
+    print(f"✓ Successfully processed {successful}/{len(containers_to_process)} container(s)")
     print(f"  Output: {output_folder.absolute()}")
     return successful > 0
 
@@ -327,12 +423,48 @@ def render_scenes(threshold=None, min_area_cm2=None, cleanup_scenes=None):
         return False
     
     # Find all original container files
-    original_files = sorted([f for f in original_dir.glob("*.obj") if "_scene.obj" not in f.name])
-    if not original_files:
+    all_original_files = sorted([f for f in original_dir.glob("*.obj") if "_scene.obj" not in f.name])
+    if not all_original_files:
         print("❌ Error: No container files found!")
         return False
     
-    print(f"Found {len(original_files)} container file(s)")
+    # Determine starting container number based on cleanup choice
+    start_number = 1
+    if not cleanup_scenes:
+        # Find the highest container number that already has rendered outputs
+        import re
+        output_dir.mkdir(exist_ok=True)
+        if output_dir.exists():
+            existing_rendered = []
+            for container_dir in output_dir.glob("container_*"):
+                if container_dir.is_dir():
+                    match = re.search(r'container_\w+_(\d{4})', container_dir.name)
+                    if match:
+                        number = int(match.group(1))
+                        existing_rendered.append(number)
+            
+            # Also check output_scene_dataset if it exists
+            dataset_dir = Path("output_scene_dataset")
+            if dataset_dir.exists():
+                for file in dataset_dir.glob("container_*_*_dent_mask.png"):
+                    match = re.search(r'container_\w+_(\d{4})_', file.name)
+                    if match:
+                        number = int(match.group(1))
+                        existing_rendered.append(number)
+            
+            if existing_rendered:
+                max_rendered_number = max(existing_rendered)
+                start_number = max_rendered_number + 1
+                print(f"  ℹ Processing containers starting from number {start_number:04d}")
+    
+    # Filter containers to only process those >= start_number
+    original_files = filter_containers_by_start_number(all_original_files, start_number)
+    
+    if not original_files:
+        print(f"  ℹ No containers to process (all containers < {start_number:04d} already have rendered outputs)")
+        return True
+    
+    print(f"Found {len(all_original_files)} total container file(s), processing {len(original_files)} container(s) from number {start_number:04d}")
     
     # Get user input if not provided
     if cleanup_scenes is None:
@@ -343,6 +475,12 @@ def render_scenes(threshold=None, min_area_cm2=None, cleanup_scenes=None):
         if output_dir.exists():
             shutil.rmtree(output_dir)
             print("  ✓ Cleaned up previous scene outputs")
+        
+        # Also clean up output_scene_dataset if it exists
+        dataset_dir = Path("output_scene_dataset")
+        if dataset_dir.exists():
+            shutil.rmtree(dataset_dir)
+            print("  ✓ Cleaned up previous dataset outputs")
     
     if threshold is None:
         while True:
@@ -429,13 +567,18 @@ def render_scenes(threshold=None, min_area_cm2=None, cleanup_scenes=None):
         
         try:
             container_output_dir = output_dir / f"container_{container_type}_{sample_id:04d}"
+            # Also save to dataset directory
+            dataset_dir = Path("output_scene_dataset")
+            dataset_dir.mkdir(exist_ok=True)
             comparison_renderer.process_container_pair(
                 original_path=original_path,
                 dented_path=dented_path,
                 output_dir=container_output_dir,
                 container_type=container_type,
                 threshold=threshold,
-                min_area_cm2=min_area_cm2
+                min_area_cm2=min_area_cm2,
+                dataset_dir=dataset_dir,
+                save_rgb_to_dataset=True
             )
             successful += 1
             print(f"    ✓ Successfully processed container {sample_id}")
@@ -454,6 +597,9 @@ def render_scenes(threshold=None, min_area_cm2=None, cleanup_scenes=None):
     if failed > 0:
         print(f"✗ Failed: {failed}")
     print(f"📁 Output directory: {output_dir.absolute()}")
+    dataset_dir = Path("output_scene_dataset")
+    if dataset_dir.exists():
+        print(f"📁 Dataset directory: {dataset_dir.absolute()}")
     print("\nGenerated files per container:")
     print("  • RGB images: *_original_rgb.png, *_dented_rgb.png")
     print("  • Depth maps: *_original_depth.npy, *_dented_depth.npy")
