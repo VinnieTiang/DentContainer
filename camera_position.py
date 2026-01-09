@@ -159,55 +159,56 @@ class CameraPoseGenerator:
         # Camera should be inside container, looking at door
         # Camera position = door_center - normal * distance (moving inward from door)
         
-        # Left door - Upper shot
-        cam_height_left_upper = self._get_randomized_camera_height(door_upper_target)
-        # Camera positioned along rotated door normal (inward), at distance door_dist from door surface
-        # Since normal points inward, camera = door_center + normal * distance (moving inward)
-        left_cam_eye_x = left_door_center_x_rotated + left_door_normal_x * door_dist
-        left_cam_eye_z = left_door_center_z_rotated + left_door_normal_z * door_dist
-        # Target point on door surface (rotated position)
-        left_target_x = left_door_center_x_rotated
-        left_target_z = left_door_center_z_rotated
-        poses.append({
-            "name": "internal_door_left_upper",
-            "eye": torch.tensor([[left_cam_eye_x, cam_height_left_upper, left_cam_eye_z]]),
-            "at": torch.tensor([[left_target_x, door_upper_target, left_target_z]]),
-            "up": torch.tensor([[0, 1, 0]])
-        })
-        
-        # Left door - Lower shot
-        cam_height_left_lower = self._get_randomized_camera_height(door_lower_target)
-        poses.append({
-            "name": "internal_door_left_lower",
-            "eye": torch.tensor([[left_cam_eye_x, cam_height_left_lower, left_cam_eye_z]]),
-            "at": torch.tensor([[left_target_x, door_lower_target, left_target_z]]),
-            "up": torch.tensor([[0, 1, 0]])
-        })
-        
-        # Right door - Upper shot
-        cam_height_right_upper = self._get_randomized_camera_height(door_upper_target)
-        # Camera positioned along rotated door normal (inward), at distance door_dist from door surface
-        # Since normal points inward, camera = door_center + normal * distance (moving inward)
-        right_cam_eye_x = right_door_center_x_rotated + right_door_normal_x * door_dist
-        right_cam_eye_z = right_door_center_z_rotated + right_door_normal_z * door_dist
-        # Target point on door surface (rotated position)
-        right_target_x = right_door_center_x_rotated
-        right_target_z = right_door_center_z_rotated
-        poses.append({
-            "name": "internal_door_right_upper",
-            "eye": torch.tensor([[right_cam_eye_x, cam_height_right_upper, right_cam_eye_z]]),
-            "at": torch.tensor([[right_target_x, door_upper_target, right_target_z]]),
-            "up": torch.tensor([[0, 1, 0]])
-        })
-        
-        # Right door - Lower shot
-        cam_height_right_lower = self._get_randomized_camera_height(door_lower_target)
-        poses.append({
-            "name": "internal_door_right_lower",
-            "eye": torch.tensor([[right_cam_eye_x, cam_height_right_lower, right_cam_eye_z]]),
-            "at": torch.tensor([[right_target_x, door_lower_target, right_target_z]]),
-            "up": torch.tensor([[0, 1, 0]])
-        })
+        # Door panel captures commented out - not capturing door panels now
+        # # Left door - Upper shot
+        # cam_height_left_upper = self._get_randomized_camera_height(door_upper_target)
+        # # Camera positioned along rotated door normal (inward), at distance door_dist from door surface
+        # # Since normal points inward, camera = door_center + normal * distance (moving inward)
+        # left_cam_eye_x = left_door_center_x_rotated + left_door_normal_x * door_dist
+        # left_cam_eye_z = left_door_center_z_rotated + left_door_normal_z * door_dist
+        # # Target point on door surface (rotated position)
+        # left_target_x = left_door_center_x_rotated
+        # left_target_z = left_door_center_z_rotated
+        # poses.append({
+        #     "name": "internal_door_left_upper",
+        #     "eye": torch.tensor([[left_cam_eye_x, cam_height_left_upper, left_cam_eye_z]]),
+        #     "at": torch.tensor([[left_target_x, door_upper_target, left_target_z]]),
+        #     "up": torch.tensor([[0, 1, 0]])
+        # })
+        # 
+        # # Left door - Lower shot
+        # cam_height_left_lower = self._get_randomized_camera_height(door_lower_target)
+        # poses.append({
+        #     "name": "internal_door_left_lower",
+        #     "eye": torch.tensor([[left_cam_eye_x, cam_height_left_lower, left_cam_eye_z]]),
+        #     "at": torch.tensor([[left_target_x, door_lower_target, left_target_z]]),
+        #     "up": torch.tensor([[0, 1, 0]])
+        # })
+        # 
+        # # Right door - Upper shot
+        # cam_height_right_upper = self._get_randomized_camera_height(door_upper_target)
+        # # Camera positioned along rotated door normal (inward), at distance door_dist from door surface
+        # # Since normal points inward, camera = door_center + normal * distance (moving inward)
+        # right_cam_eye_x = right_door_center_x_rotated + right_door_normal_x * door_dist
+        # right_cam_eye_z = right_door_center_z_rotated + right_door_normal_z * door_dist
+        # # Target point on door surface (rotated position)
+        # right_target_x = right_door_center_x_rotated
+        # right_target_z = right_door_center_z_rotated
+        # poses.append({
+        #     "name": "internal_door_right_upper",
+        #     "eye": torch.tensor([[right_cam_eye_x, cam_height_right_upper, right_cam_eye_z]]),
+        #     "at": torch.tensor([[right_target_x, door_upper_target, right_target_z]]),
+        #     "up": torch.tensor([[0, 1, 0]])
+        # })
+        # 
+        # # Right door - Lower shot
+        # cam_height_right_lower = self._get_randomized_camera_height(door_lower_target)
+        # poses.append({
+        #     "name": "internal_door_right_lower",
+        #     "eye": torch.tensor([[right_cam_eye_x, cam_height_right_lower, right_cam_eye_z]]),
+        #     "at": torch.tensor([[right_target_x, door_lower_target, right_target_z]]),
+        #     "up": torch.tensor([[0, 1, 0]])
+        # })
 
         # 4. Back wall view (from inside, looking at center of wall)
         # Camera is positioned further from back wall to capture more area
