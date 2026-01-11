@@ -981,6 +981,13 @@ class DentComparisonRenderer:
                 # Save binary mask: WHITE (255) = dented areas (different depth), BLACK (0) = normal areas (same depth)
                 imageio.imwrite(shot_output_dir / f"{base_name}_dent_mask.png", dent_mask)
                 
+                # Save mask as NPY for DL training (binary float32: 0.0 = background, 1.0 = dent)
+                # Convert from uint8 (0/255) to float32 (0.0/1.0) for consistency with depth maps
+                dent_mask_npy_path = shot_output_dir / f"{base_name}_dent_mask.npy"
+                dent_mask_binary = (dent_mask > 127).astype(np.float32)
+                np.save(dent_mask_npy_path, dent_mask_binary)
+                logger.info(f"    ✓ Saved dent mask (NPY): {dent_mask_npy_path.name}")
+                
                 # Save pure binary mask (before morphology operations)
                 imageio.imwrite(shot_output_dir / f"{base_name}_dent_mask_pure.png", pure_dent_mask)
                 
@@ -1009,11 +1016,24 @@ class DentComparisonRenderer:
                 dataset_dent_mask_path = dataset_dir / f"{base_name}_{shot_name}_dent_mask.png"
                 imageio.imwrite(dataset_dent_mask_path, dent_mask)
                 
+                # Save mask as NPY for DL training (binary float32: 0.0 = background, 1.0 = dent)
+                # Convert from uint8 (0/255) to float32 (0.0/1.0) for consistency with depth maps
+                dataset_dent_mask_npy_path = dataset_dir / f"{base_name}_{shot_name}_dent_mask.npy"
+                dent_mask_binary = (dent_mask > 127).astype(np.float32)
+                np.save(dataset_dent_mask_npy_path, dent_mask_binary)
+                logger.info(f"    ✓ Saved dent mask (NPY) to dataset: {base_name}_{shot_name}_dent_mask.npy")
+                
                 # Save RGB image to dataset folder ONLY for testset generation
                 if is_testset or save_rgb_to_dataset:
                     dataset_rgb_path = dataset_dir / f"{base_name}_{shot_name}_rgb.png"
                     imageio.imwrite(dataset_rgb_path, dented_rgb)
                     logger.info(f"    ✓ Saved RGB image to dataset: {base_name}_{shot_name}_rgb.png")
+                
+                # Save dent segment JSON to dataset folder (always save, matches other dataset files)
+                dataset_segment_json_path = dataset_dir / f"{base_name}_{shot_name}_dent_segments.json"
+                with open(dataset_segment_json_path, 'w') as f:
+                    json.dump(segment_data, f, indent=2)
+                logger.info(f"    ✓ Saved dent segment JSON to dataset: {base_name}_{shot_name}_dent_segments.json")
                 
                 # Calculate statistics
                 dent_pixels = np.sum(dent_mask > 0)
