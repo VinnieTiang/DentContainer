@@ -91,7 +91,8 @@ def load_output_scene_data():
                 'dented_depth_npy': None,
                 'depth_diff_npy': None,
                 'original_pointcloud_ply': None,
-                'dented_pointcloud_ply': None
+                'dented_pointcloud_ply': None,
+                'dent_segments_json': None
             }
             
             # Pattern matching for files
@@ -129,6 +130,8 @@ def load_output_scene_data():
                     shot_files['original_pointcloud_ply'] = file_path
                 elif '_dented_pointcloud.ply' in filename:
                     shot_files['dented_pointcloud_ply'] = file_path
+                elif '_dent_segments.json' in filename:
+                    shot_files['dent_segments_json'] = file_path
                 elif filename.endswith('.ply'):
                     # Fallback: if no specific match, assign to original if not already set
                     if shot_files['original_pointcloud_ply'] is None:
@@ -142,10 +145,20 @@ def load_output_scene_data():
                         shot_stats = shot_data
                         break
             
+            # Load dent segments JSON if available
+            dent_segments_data = None
+            if shot_files['dent_segments_json'] and shot_files['dent_segments_json'].exists():
+                try:
+                    with open(shot_files['dent_segments_json'], 'r') as f:
+                        dent_segments_data = json.load(f)
+                except Exception as e:
+                    pass  # Silently fail if can't load
+            
             shots[shot_name] = {
                 'files': shot_files,
                 'stats': shot_stats,
-                'path': shot_dir
+                'path': shot_dir,
+                'dent_segments': dent_segments_data
             }
         
         containers[container_name] = {
@@ -963,7 +976,17 @@ def main():
             
             st.metric("Dent Pixels", f"{stats.get('dent_pixels', 0):,}")
             st.metric("Dent Percentage", f"{stats.get('dent_percentage', 0):.2f}%")
-            st.metric("Max Depth Diff", f"{stats.get('max_depth_diff_mm', 0):.2f} mm")
+            
+            # Calculate max depth using Virtual Straight Edge method (max_depth_local_plane_mm)
+            dent_segments = selected_shot.get('dent_segments', {}).get('segments', []) if selected_shot.get('dent_segments') else []
+            if dent_segments:
+                # Use max_depth_local_plane_mm (Virtual Straight Edge) as primary metric
+                max_depth = max([seg.get('max_depth_local_plane_mm', seg.get('max_depth_diff_mm', 0)) for seg in dent_segments], default=0)
+            else:
+                # Fallback to stats if segments not available
+                max_depth = stats.get('max_dent_depth_mm', stats.get('max_depth_diff_mm', 0))
+            st.metric("Max Dent Depth", f"{max_depth:.2f} mm")
+            st.caption("Directional Scanning method (95th percentile)")
         
         # Refresh button
         st.divider()
@@ -983,11 +1006,20 @@ def main():
     with col2:
         if selected_shot['stats']:
             stats = selected_shot['stats']
-            severity_color = 'red' if stats.get('max_depth_diff_mm', 0) > 50 else 'orange' if stats.get('max_depth_diff_mm', 0) > 20 else 'green'
+            # Calculate max depth using Virtual Straight Edge method (max_depth_local_plane_mm)
+            dent_segments = selected_shot.get('dent_segments', {}).get('segments', []) if selected_shot.get('dent_segments') else []
+            if dent_segments:
+                # Use max_depth_local_plane_mm (Virtual Straight Edge) as primary metric
+                max_depth = max([seg.get('max_depth_local_plane_mm', seg.get('max_depth_diff_mm', 0)) for seg in dent_segments], default=0)
+            else:
+                # Fallback to stats if segments not available
+                max_depth = stats.get('max_dent_depth_mm', stats.get('max_depth_diff_mm', 0))
+            severity_color = 'red' if max_depth > 50 else 'orange' if max_depth > 20 else 'green'
             st.metric(
-                "Max Depth Difference",
-                f"{stats.get('max_depth_diff_mm', 0):.2f} mm"
+                "Max Dent Depth",
+                f"{max_depth:.2f} mm"
             )
+            st.caption("Directional Scanning (95th percentile)")
     
     # Tabs for different views
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🖼️ Images", "📊 Statistics", "📈 Comparison", "🔍 Depth Analysis", "☁️ 3D Point Cloud", "📷 Camera Simulation"])
@@ -1106,40 +1138,196 @@ def main():
             stats = selected_shot['stats']
             
             # Key metrics
-            metric_col1, metric_col2, metric_col3 = st.columns(3)
+            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
             
             with metric_col1:
                 st.metric("Dent Pixels", f"{stats.get('dent_pixels', 0):,}")
             with metric_col2:
                 st.metric("Dent Percentage", f"{stats.get('dent_percentage', 0):.2f}%")
             with metric_col3:
-                st.metric("Max Depth Diff", f"{stats.get('max_depth_diff_mm', 0):.2f} mm")
+                st.metric("Dent Area", f"{stats.get('dent_area_cm2', 0):.2f} cm²")
+            with metric_col4:
+                # Calculate max depth using Virtual Straight Edge method (max_depth_local_plane_mm)
+                dent_segments = selected_shot.get('dent_segments', {}).get('segments', []) if selected_shot.get('dent_segments') else []
+                if dent_segments:
+                    # Use max_depth_local_plane_mm (Virtual Straight Edge) as primary metric
+                    max_depth = max([seg.get('max_depth_local_plane_mm', seg.get('max_depth_diff_mm', 0)) for seg in dent_segments], default=0)
+                else:
+                    # Fallback to stats if segments not available
+                    max_depth = stats.get('max_dent_depth_mm', stats.get('max_depth_diff_mm', 0))
+                st.metric("Max Dent Depth", f"{max_depth:.2f} mm")
+                st.caption("Directional Scanning")
             
             st.divider()
             
-            # Depth metrics
-            st.markdown("### Depth Metrics")
-            st.metric("Max Depth Difference", f"{stats.get('max_depth_diff_mm', 0):.2f} mm")
+            # Depth Metrics Section - Directional Scanning with Peak-Bridging Methodology
+            st.markdown("### 📊 Depth Metrics - Directional Scanning with Peak-Bridging")
+            st.info("""
+            **🎯 Primary Measurement: Multi-Wave Aware Directional Scanning**
+            
+            This method handles **Single-Wave AND Multi-Wave** impacts using Geometric Continuity + Peak-Bridging:
+            
+            **Step 1: Detect Orientation**
+            - Analyzes the wall to determine if corrugations run **Vertically** (Side Walls) or **Horizontally** (Roofs)
+            
+            **Step 2: Directional Scan**
+            - **Vertical Corrugation**: Only scans **Up/Down** (same column), strictly ignores Left/Right neighbors
+            - **Horizontal Corrugation**: Only scans **Left/Right** (same row), strictly ignores Up/Down neighbors
+            
+            **Step 3: Multi-Wave Detection**
+            - Compares local median of healthy neighbors to global median:
+              * **Pure Valley Dent** (local > global + 15mm): Fits plane to Valley Floor
+              * **Hill or Multi-Wave Dent**: Activates Peak Filter
+            
+            **Step 4: Peak Filter (For Multi-Wave Dents)**
+            - Removes points deeper than global median (valleys)
+            - Keeps only Hill Tops (points ≤ global median)
+            - Simulates a rigid ruler "bridging" the gap over valleys and dents
+            
+            **Step 5: Fit Reference Plane**
+            - Uses RANSAC to fit a plane to filtered neighbors (Valley Floor OR Hill Tops)
+            
+            **Step 6: Measure Perpendicular Drop**
+            - Calculates distance from dent pixels straight up to the virtual plane
+            - Reports 95th percentile for robustness
+            
+            ✅ **Why this solves Multi-Wave Dents**: 
+            - **Single Valley Dent**: Snaps to Valley Floor ✅
+            - **Single Hill Dent**: Snaps to Hill Top ✅
+            - **Multi-Wave Dent** (Hill→Valley→Hill): Bridges Hill Tops, ignores valley ✅
+            - Matches how inspectors place ruler across peaks for multi-corrugation impacts
+            """)
+            
+            # Load segment data if available
+            dent_segments = selected_shot.get('dent_segments', {}).get('segments', []) if selected_shot.get('dent_segments') else []
+            
+            if dent_segments:
+                # Calculate max values using Virtual Straight Edge method (max_depth_local_plane_mm)
+                max_virtual_straight_edge = max([seg.get('max_depth_local_plane_mm', seg.get('max_depth_diff_mm', 0)) for seg in dent_segments], default=0)
+                
+                # Get wave location distribution
+                wave_locations = [seg.get('wave_location', 'UNKNOWN') for seg in dent_segments]
+                hill_count = wave_locations.count('HILL')
+                valley_count = wave_locations.count('VALLEY')
+                transition_count = wave_locations.count('TRANSITION_ZONE')
+                
+                # Calculate average reference plane depth
+                avg_local_plane_depth = np.mean([seg.get('local_plane_depth_m', 0) * 1000 for seg in dent_segments if seg.get('local_plane_depth_m')]) if dent_segments else 0
+                
+                # Display primary metric
+                depth_metrics_col1, depth_metrics_col2 = st.columns(2)
+                
+                with depth_metrics_col1:
+                    st.markdown("#### 🎯 Primary Measurement: Directional Scanning")
+                    st.metric("Max Dent Depth (95th Percentile)", f"{max_virtual_straight_edge:.2f} mm")
+                    st.caption("Perpendicular drop using geometric continuity - scans along corrugation direction")
+                    
+                    # Determine orientation from shot name
+                    shot_name_lower = selected_shot_name.lower()
+                    if 'roof' in shot_name_lower:
+                        orientation_display = "HORIZONTAL (Roof - scans Left/Right)"
+                    elif 'wall' in shot_name_lower or 'door' in shot_name_lower:
+                        orientation_display = "VERTICAL (Side Wall - scans Up/Down)"
+                    else:
+                        orientation_display = "Detected from depth map"
+                    
+                    st.markdown("#### 📐 Corrugation Orientation")
+                    st.write(f"**Orientation:** {orientation_display}")
+                    st.caption("Directional scanning ensures we stay on the same corrugation wave")
+                    
+                    st.markdown("#### 📍 Surface Classification")
+                    if hill_count > 0:
+                        st.write(f"**Hill (Upper Corrugation):** {hill_count} segment(s)")
+                    if valley_count > 0:
+                        st.write(f"**Valley (Lower Corrugation):** {valley_count} segment(s)")
+                    if transition_count > 0:
+                        st.write(f"**Transition Zone:** {transition_count} segment(s)")
+                
+                with depth_metrics_col2:
+                    st.markdown("#### 📏 Reference Plane Information")
+                    if avg_local_plane_depth > 0:
+                        st.metric("Average Reference Plane Depth", f"{avg_local_plane_depth:.2f} mm")
+                        st.caption("Depth of the virtual straight edge (RANSAC plane)")
+                    
+                    # Show comparison metrics for reference
+                    st.markdown("#### 📊 Comparison Metrics (For Reference)")
+                    max_original_vs_dented = max([seg.get('max_depth_diff_original_vs_dented_mm', 0) for seg in dent_segments], default=0)
+                    st.metric("Original vs Dented", f"{max_original_vs_dented:.2f} mm")
+                    st.caption("Direct pixel-by-pixel comparison")
+                    
+                    if stats.get('median_panel_depth_mm'):
+                        st.metric("Global Median Depth", f"{stats.get('median_panel_depth_mm', 0):.2f} mm")
+                        st.caption("Average depth of entire panel")
+                
+                st.divider()
+                
+                # Segment-level details
+                st.divider()
+                st.markdown("### 🔍 Segment-Level Depth Details")
+                if len(dent_segments) > 0:
+                    # Create segment table with Virtual Straight Edge metrics
+                    segment_data = []
+                    for seg in dent_segments:
+                        segment_data.append({
+                            'Segment ID': seg.get('segment_id', 'N/A'),
+                            'Area (cm²)': f"{seg.get('area_cm2', 0):.2f}",
+                            'Max Depth (mm)': f"{seg.get('max_depth_local_plane_mm', seg.get('max_depth_diff_mm', 0)):.2f}",
+                            'Wave Location': seg.get('wave_location', 'UNKNOWN'),
+                            'Reference Plane (mm)': f"{seg.get('local_plane_depth_m', 0) * 1000:.2f}" if seg.get('local_plane_depth_m') else "N/A",
+                            'Direction': seg.get('direction', 'unknown'),
+                            'Original vs Dented (mm)': f"{seg.get('max_depth_diff_original_vs_dented_mm', 0):.2f}"
+                        })
+                    
+                    df_segments = pd.DataFrame(segment_data)
+                    st.dataframe(df_segments, use_container_width=True, hide_index=True)
+                    
+                    # Add explanation
+                    with st.expander("📖 Understanding the Metrics"):
+                        st.markdown("""
+                        **Column Explanations:**
+                        
+                        - **Max Depth (mm)**: Primary measurement using Virtual Straight Edge method (95th percentile perpendicular drop)
+                        - **Wave Location**: Classification of dent location (HILL = upper corrugation, VALLEY = lower corrugation)
+                        - **Reference Plane (mm)**: Depth of the RANSAC-fitted plane (the "virtual straight edge")
+                        - **Direction**: Whether dent pushes inward (toward camera) or outward (away from camera)
+                        - **Original vs Dented (mm)**: Direct pixel comparison (for reference only)
+                        """)
+                else:
+                    st.info("No dent segments found")
+            else:
+                # Fallback to summary stats if segment data not available
+                st.info("📋 Segment-level depth data not available. Showing summary statistics.")
+                max_depth_mm = stats.get('max_dent_depth_mm', stats.get('max_depth_diff_mm', 0))
+                st.metric("Max Dent Depth (Summary)", f"{max_depth_mm:.2f} mm")
+                if stats.get('median_panel_depth_mm'):
+                    st.metric("Median Panel Depth", f"{stats.get('median_panel_depth_mm', 0):.2f} mm")
             
             # Visual indicators
             st.divider()
-            st.markdown("### Severity Assessment")
+            st.markdown("### ⚠️ Severity Assessment")
             
-            max_depth_mm = stats.get('max_depth_diff_mm', 0)
+            # Calculate max depth using Virtual Straight Edge method (max_depth_local_plane_mm)
+            dent_segments = selected_shot.get('dent_segments', {}).get('segments', []) if selected_shot.get('dent_segments') else []
+            if dent_segments:
+                # Use max_depth_local_plane_mm (Virtual Straight Edge) as primary metric
+                max_depth_mm = max([seg.get('max_depth_local_plane_mm', seg.get('max_depth_diff_mm', 0)) for seg in dent_segments], default=0)
+            else:
+                # Fallback to stats if segments not available
+                max_depth_mm = stats.get('max_dent_depth_mm', stats.get('max_depth_diff_mm', 0))
             dent_percentage = stats.get('dent_percentage', 0)
             
             if max_depth_mm > 50:
-                st.error(f"🔴 **SEVERE** - Maximum depth difference: {max_depth_mm:.2f} mm")
+                st.error(f"🔴 **SEVERE** - Maximum dent depth: {max_depth_mm:.2f} mm")
             elif max_depth_mm > 20:
-                st.warning(f"🟠 **MODERATE** - Maximum depth difference: {max_depth_mm:.2f} mm")
+                st.warning(f"🟠 **MODERATE** - Maximum dent depth: {max_depth_mm:.2f} mm")
             elif max_depth_mm > 5:
-                st.info(f"🟡 **MINOR** - Maximum depth difference: {max_depth_mm:.2f} mm")
+                st.info(f"🟡 **MINOR** - Maximum dent depth: {max_depth_mm:.2f} mm")
             else:
-                st.success(f"🟢 **SUPERFICIAL** - Maximum depth difference: {max_depth_mm:.2f} mm")
+                st.success(f"🟢 **SUPERFICIAL** - Maximum dent depth: {max_depth_mm:.2f} mm")
             
             # IICL-6 Compliance
             st.divider()
-            st.markdown("### IICL-6 Compliance Check")
+            st.markdown("### ✅ IICL-6 Compliance Check")
             if max_depth_mm > 5.0:
                 st.error("❌ **FAIL** - Depth exceeds 5mm threshold (IICL-6 standard)")
             else:
@@ -1177,15 +1365,19 @@ def main():
                 # Create DataFrame
                 shots_data = []
                 for shot_data in summary['shots']:
+                    max_depth = shot_data.get('max_dent_depth_mm', shot_data.get('max_depth_diff_mm', 0))
                     shots_data.append({
                         'Shot Name': format_shot_name(shot_data.get('shot_name', '')),
                         'Category': get_shot_category(shot_data.get('shot_name', '')),
                         'Dent Pixels': shot_data.get('dent_pixels', 0),
                         'Dent %': f"{shot_data.get('dent_percentage', 0):.2f}%",
-                        'Max Depth (mm)': f"{shot_data.get('max_depth_diff_mm', 0):.2f}"
+                        'Max Depth (mm)': max_depth,
+                        'Num Segments': shot_data.get('num_segments', 0)
                     })
                 
                 df = pd.DataFrame(shots_data)
+                # Convert Max Depth to numeric for proper sorting/display
+                df['Max Depth (mm)'] = pd.to_numeric(df['Max Depth (mm)'], errors='coerce')
                 
                 # Display table
                 st.dataframe(df, use_container_width=True, hide_index=True)
@@ -1194,13 +1386,14 @@ def main():
                 chart_col1, chart_col2 = st.columns(2)
                 
                 with chart_col1:
-                    st.markdown("#### Max Depth by Shot")
+                    st.markdown("#### Max Dent Depth by Shot")
                     fig1 = px.bar(
                         df,
                         x='Shot Name',
                         y='Max Depth (mm)',
                         color='Category',
-                        title="Maximum Depth Difference by Shot"
+                        title="Maximum Dent Depth by Shot (vs Median Panel)",
+                        labels={'Max Depth (mm)': 'Max Depth (mm)'}
                     )
                     fig1.update_xaxes(tickangle=-45)
                     st.plotly_chart(fig1, use_container_width=True)
@@ -1225,7 +1418,7 @@ def main():
                 
                 total_shots = len(summary['shots'])
                 shots_with_dents = sum(1 for s in summary['shots'] if s.get('dent_pixels', 0) > 0)
-                max_depth_all = max((s.get('max_depth_diff_mm', 0) for s in summary['shots']), default=0)
+                max_depth_all = max((s.get('max_dent_depth_mm', s.get('max_depth_diff_mm', 0)) for s in summary['shots']), default=0)
                 avg_dent_percentage = np.mean([s.get('dent_percentage', 0) for s in summary['shots']])
                 
                 with summary_col1:
@@ -1255,6 +1448,17 @@ def main():
         if shot_files['dented_depth_npy'] and shot_files['dented_depth_npy'].exists():
             dented_depth_data = load_npy_depth(shot_files['dented_depth_npy'])
         
+        # Add visualization mode selector
+        if dented_depth_data is not None or depth_diff_data is not None:
+            viz_mode = st.radio(
+                "Visualization Mode:",
+                ["Dented Panel Depth", "Depth Difference"],
+                index=0,
+                help="Choose whether to visualize the actual depth of the dented panel or the depth difference"
+            )
+        else:
+            viz_mode = None
+        
         if depth_diff_data is not None:
             # Depth histogram
             st.markdown("### Depth Difference Distribution")
@@ -1282,42 +1486,151 @@ def main():
                     st.metric("Median Depth Diff", f"{np.median(depth_filtered) * 1000:.2f} mm")
                     st.metric("Max Depth Diff", f"{np.max(depth_filtered) * 1000:.2f} mm")
                     st.metric("95th Percentile", f"{np.percentile(depth_filtered, 95) * 1000:.2f} mm")
-            
-            # 3D depth visualization
-            st.markdown("### 3D Depth Visualization")
-            
+        
+        # 3D depth visualization
+        st.markdown("### 3D Depth Visualization")
+        
+        # Determine which data to visualize
+        if viz_mode == "Dented Panel Depth" and dented_depth_data is not None:
+            # Visualize dented panel depth
+            depth_data_to_plot = dented_depth_data
+            depth_title = "3D Dented Panel Depth Surface"
+            z_axis_title = "Depth (meters)"
+            colorbar_title = "Depth (meters)"
+            z_multiplier = 1.0  # Keep in meters for depth visualization
+        elif depth_diff_data is not None:
+            # Visualize depth difference
+            depth_data_to_plot = depth_diff_data
+            depth_title = "3D Depth Difference Surface"
+            z_axis_title = "Depth Difference (mm)"
+            colorbar_title = "Depth Difference (mm)"
+            z_multiplier = 1000.0  # Convert to mm
+        else:
+            depth_data_to_plot = None
+        
+        if depth_data_to_plot is not None:
             # Sample data for 3D plot (downsample for performance)
-            sample_rate = max(1, depth_diff_data.shape[0] // 100)
-            depth_sampled = depth_diff_data[::sample_rate, ::sample_rate]
+            sample_rate = max(1, depth_data_to_plot.shape[0] // 100)
+            depth_sampled = depth_data_to_plot[::sample_rate, ::sample_rate]
             
+            # Create meshgrid coordinates
+            # For depth visualization, we can use pixel coordinates or convert to meters
+            # Using pixel coordinates for now (can be enhanced to use real-world coordinates)
             y_coords, x_coords = np.meshgrid(
                 np.arange(0, depth_sampled.shape[0]) * sample_rate,
                 np.arange(0, depth_sampled.shape[1]) * sample_rate,
                 indexing='ij'
             )
             
+            # Calculate z values with appropriate multiplier
+            z_values = depth_sampled * z_multiplier
+            
             fig_3d = go.Figure(data=[go.Surface(
-                z=depth_sampled * 1000,  # Convert to mm
+                z=z_values,
                 x=x_coords,
                 y=y_coords,
                 colorscale='Viridis',
-                colorbar=dict(title="Depth Difference (mm)")
+                colorbar=dict(title=colorbar_title),
+                showscale=True
             )])
             
             fig_3d.update_layout(
-                title="3D Depth Difference Surface",
+                title=depth_title,
                 scene=dict(
                     xaxis_title="X (pixels)",
                     yaxis_title="Y (pixels)",
-                    zaxis_title="Depth Difference (mm)"
+                    zaxis_title=z_axis_title,
+                    camera=dict(
+                        eye=dict(x=1.5, y=1.5, z=1.2),
+                        center=dict(x=0, y=0, z=0),
+                        up=dict(x=0, y=0, z=1)
+                    )
                 ),
                 height=600
             )
             
             st.plotly_chart(fig_3d, use_container_width=True)
             
+            # Add explanation
+            if viz_mode == "Dented Panel Depth":
+                st.info("💡 **Dented Panel Depth**: This shows the actual depth values of the dented panel surface. "
+                       "Deeper areas (farther from camera) appear lower in the visualization. "
+                       "Dents appear as depressions in the surface.")
+            else:
+                st.info("💡 **Depth Difference**: This shows the difference between original and dented panel depths. "
+                       "Higher values indicate larger differences (dents).")
+                
+                # Add explanation about V-shaped pattern
+                if depth_diff_data is not None:
+                    # Calculate edge vs center statistics
+                    h, w = depth_diff_data.shape
+                    center_region = depth_diff_data[h//4:3*h//4, w//4:3*w//4]
+                    edge_mask = np.ones_like(depth_diff_data, dtype=bool)
+                    edge_mask[h//4:3*h//4, w//4:3*w//4] = False
+                    edge_region = depth_diff_data[edge_mask]
+                    
+                    center_mean = np.mean(center_region[center_region > 0.001]) * 1000 if np.any(center_region > 0.001) else 0
+                    edge_mean = np.mean(edge_region[edge_region > 0.001]) * 1000 if np.any(edge_region > 0.001) else 0
+                    
+                    # Calculate original vs dented depth statistics if available
+                    stats_text = ""
+                    if original_depth_data is not None and dented_depth_data is not None:
+                        original_center = original_depth_data[h//4:3*h//4, w//4:3*w//4]
+                        dented_center = dented_depth_data[h//4:3*h//4, w//4:3*w//4]
+                        original_edge = original_depth_data[edge_mask]
+                        dented_edge = dented_depth_data[edge_mask]
+                        
+                        original_center_mean = np.mean(original_center[original_center > 0]) if np.any(original_center > 0) else 0
+                        dented_center_mean = np.mean(dented_center[dented_center > 0]) if np.any(dented_center > 0) else 0
+                        original_edge_mean = np.mean(original_edge[original_edge > 0]) if np.any(original_edge > 0) else 0
+                        dented_edge_mean = np.mean(dented_edge[dented_edge > 0]) if np.any(dented_edge > 0) else 0
+                        
+                        stats_text = f"\n\n**Depth Statistics:**\n"
+                        stats_text += f"- Center: Original={original_center_mean:.3f}m, Dented={dented_center_mean:.3f}m\n"
+                        stats_text += f"- Edge: Original={original_edge_mean:.3f}m, Dented={dented_edge_mean:.3f}m"
+                    
+                    if edge_mean > center_mean * 1.5:  # Significant edge effect
+                        st.warning(f"⚠️ **V-Shaped Pattern Detected**: The depth difference is higher at the edges than in the center.\n"
+                                 f"Center mean diff: {center_mean:.2f}mm, Edge mean diff: {edge_mean:.2f}mm{stats_text}")
+                        with st.expander("🔍 Why are there depth differences at the edges?"):
+                            explanation = """
+                            **Understanding the V-Shape Pattern**
+                            
+                            You're seeing depth differences between the original and dented NPY files even though they're rendered from the **same camera position**. Here's why:
+                            
+                            **1. Same Camera, Different Meshes** ✅
+                            - Both meshes are rendered from identical camera poses (same eye, at, up vectors)
+                            - The depth difference is calculated as: `depth_diff = |dented_depth - original_depth|`
+                            
+                            **2. Why Edges Show Larger Differences:**
+                            
+                            **A. Perspective Distortion (75° FOV)**
+                            - **Center pixels**: Sample geometry perpendicular to camera → well-aligned
+                            - **Edge pixels**: Sample geometry at oblique angles → magnify small differences
+                            
+                            **B. Mesh Geometry Differences**
+                            Even though the dented mesh is created from the original, there can be subtle differences:
+                            - **Dent falloff effects**: Dents affect nearby vertices (Gaussian falloff)
+                            - **Mesh processing**: Vertex displacement, smoothing operations
+                            - **Numerical precision**: Floating-point rounding during mesh operations
+                            - **Corrugation pattern**: Slight shifts in corrugation geometry
+                            
+                            **3. Why This Happens More at Edges:**
+                            - Edge pixels in perspective cameras sample geometry at angles
+                            - Small geometric differences (even 0.1mm) become amplified at edges
+                            - Center pixels are less sensitive because they sample perpendicular surfaces
+                            
+                            **4. This is Normal and Expected:**
+                            - The V-shape doesn't indicate a bug or misalignment
+                            - The dent detection algorithm uses thresholding (35mm default) to filter out these edge artifacts
+                            - Actual dents are correctly detected despite edge effects
+                            
+                            **💡 Tip**: To see actual dent depths without edge effects, use the "Dented Panel Depth" visualization mode instead of "Depth Difference".
+                            """
+                            st.markdown(explanation)
+            
         else:
-            st.warning("Depth difference data (NPY) not available for analysis")
+            st.warning("Depth data (NPY) not available for 3D visualization")
     
     with tab5:
         st.subheader("3D Point Cloud Visualization")

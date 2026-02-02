@@ -254,37 +254,40 @@ class CameraPoseGenerator:
         - Full coverage of roof length (including edges)
         - Proper overlap between shots (20-30% for stitching)
         - Full coverage of roof width
+        - Fixed distance of ~1.8m from camera to roof
         """
         poses = []
         num_shots = self.r_config.ROOF_SHOT_COUNT
 
-        # Use configured camera height for roof views (lower height = further from roof = better coverage)
-        # Use base height for coverage calculations, then randomize per shot
-        base_cam_height = self.r_config.INTERNAL_ROOF_CAMERA_HEIGHT
+        # Fixed distance from camera to roof: 1.8m
+        fixed_distance_to_roof = 1.8
         
-        # Calculate distance from camera to roof using base height for coverage calculations
-        # Distance = roof_height - camera_height
-        base_distance_to_roof = height - base_cam_height
+        # Calculate camera height to maintain fixed distance to roof
+        # Distance = roof_height - camera_height, so camera_height = roof_height - distance
+        cam_height = height - fixed_distance_to_roof
         
-        # Ensure base camera height is reasonable (not below floor or too high)
+        # Ensure camera height is reasonable (not below floor or too high)
         # Floor is at y=0, so cam_height should be > 0
-        if base_cam_height < 0.1:
-            base_cam_height = 0.1  # Minimum 10cm from floor
-            base_distance_to_roof = height - base_cam_height
-        elif base_cam_height > height - 0.1:
-            base_cam_height = height - 0.1  # Keep at least 10cm from roof
-            base_distance_to_roof = 0.1
+        if cam_height < 0.1:
+            # If container is too short, adjust distance to keep camera at least 10cm from floor
+            cam_height = 0.1  # Minimum 10cm from floor
+            fixed_distance_to_roof = height - cam_height  # Adjust distance accordingly
+            print(f"    Warning: Container height ({height:.2f}m) too short for 1.8m roof distance. Using {fixed_distance_to_roof:.2f}m distance.")
+        elif cam_height > height - 0.1:
+            # If container is too short, keep at least 10cm from roof
+            cam_height = height - 0.1  # Keep at least 10cm from roof
+            fixed_distance_to_roof = 0.1
+            print(f"    Warning: Container height ({height:.2f}m) too short for 1.8m roof distance. Using {fixed_distance_to_roof:.2f}m distance.")
         
-        # Calculate horizontal coverage based on FOV using base distance
+        # Calculate horizontal coverage based on FOV using fixed distance
         # FOV = 75 degrees, so horizontal coverage = 2 * distance * tan(FOV/2)
         fov_rad = np.deg2rad(self.r_config.CAMERA_FOV)
-        horizontal_coverage = 2 * base_distance_to_roof * np.tan(fov_rad / 2.0)
+        horizontal_coverage = 2 * fixed_distance_to_roof * np.tan(fov_rad / 2.0)
         
         # Verify that horizontal coverage captures full roof width
         # Note: If horizontal_coverage < width, the camera may not capture the full width
         # in a single shot. This depends on distance from roof, FOV, and container dimensions.
-        # With INTERNAL_ROOF_CAMERA_HEIGHT=0.8m, distance to roof is ~1.8m (standard) or ~2.1m (high cube).
-        # With FOV=75°, this provides good coverage. Adjust INTERNAL_ROOF_CAMERA_HEIGHT if needed.
+        # With fixed distance of 1.8m and FOV=75°, this provides good coverage.
         width_coverage_ratio = horizontal_coverage / width if width > 0 else 1.0
         if width_coverage_ratio < 1.0:
             # Log a warning but proceed - width coverage may be partial
@@ -342,10 +345,8 @@ class CameraPoseGenerator:
             middle_positions = []
         
         for i, x_pos in enumerate(middle_positions, start=1):
-            # Randomize camera height for each shot to simulate human variation
-            cam_height = self._get_randomized_camera_height(base_cam_height)
-            # Ensure randomized height stays within reasonable bounds
-            cam_height = max(0.1, min(cam_height, height - 0.1))
+            # Use fixed camera height to maintain fixed distance of 1.8m to roof
+            # No randomization - distance to roof is fixed for consistent depth values
             
             # Position camera at calculated X position, looking up at roof
             # Target is directly above camera position at roof height, centered on width

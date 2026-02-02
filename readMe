@@ -10,3 +10,5 @@ python render_rgbd.py
 # View results:
 streamlit run output_scene_viewer.py
 streamlit run simple_dataset_viewer.py  #old, panel only
+
+streamlit run dent_depth_interactive_viewer.py 

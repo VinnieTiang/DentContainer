@@ -160,7 +160,7 @@ class DentComparisonRenderer:
                       morphology_closing_size: int = 11,
                       gap_fill_threshold_ratio: float = 0.5, gap_fill_distance: int = 7,
                       internal_fill_threshold_ratio: float = 0.3, internal_fill_iterations: int = 3,
-                      min_dent_area: int = 200) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                      min_dent_area: int = 200, skip_morphology: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Compare depth maps to identify dented areas and their direction.
         
@@ -200,8 +200,9 @@ class DentComparisonRenderer:
             dented_depth = cv2.resize(dented_depth, (w, h), interpolation=cv2.INTER_LINEAR)
         
         # Calculate signed depth difference to track direction
-        # Positive = dented_depth > original_depth (inward dent, surface pushed away from camera)
-        # Negative = dented_depth < original_depth (outward dent, surface pushed toward camera)
+        # For INTERNAL camera (camera inside container):
+        # Positive = dented_depth < original_depth (inward dent, surface pushed toward camera/closer)
+        # Negative = dented_depth > original_depth (outward dent, surface pushed away from camera/farther)
         signed_depth_diff = dented_depth - original_depth
         
         # Calculate absolute depth difference between original and dented containers
@@ -210,6 +211,24 @@ class DentComparisonRenderer:
         
         # Identify valid pixels (both depths are valid and finite)
         valid_mask = (original_depth > 0) & (dented_depth > 0) & np.isfinite(original_depth) & np.isfinite(dented_depth)
+        
+        # Optional: Mask out edge regions to reduce perspective distortion artifacts
+        # Edge pixels are more sensitive to small geometric differences due to perspective projection
+        # This helps reduce V-shaped patterns at image edges
+        edge_mask_percent = 0.05  # Mask 5% from each edge (configurable, set to 0 to disable)
+        if edge_mask_percent > 0:
+            h, w = depth_diff.shape
+            edge_pixels_h = int(h * edge_mask_percent)
+            edge_pixels_w = int(w * edge_mask_percent)
+            # Create edge exclusion mask (True = exclude, False = keep)
+            edge_exclusion_mask = np.zeros_like(valid_mask, dtype=bool)
+            # Mark edges as excluded
+            edge_exclusion_mask[:edge_pixels_h, :] = True  # Top edge
+            edge_exclusion_mask[h-edge_pixels_h:, :] = True  # Bottom edge
+            edge_exclusion_mask[:, :edge_pixels_w] = True  # Left edge
+            edge_exclusion_mask[:, w-edge_pixels_w:] = True  # Right edge
+            # Exclude edge pixels from valid mask
+            valid_mask = valid_mask & ~edge_exclusion_mask
         
         # Create binary mask:
         # - Start with all BLACK (0) = normal areas (same depth)
@@ -269,45 +288,52 @@ class DentComparisonRenderer:
                     break
         
         # Create direction map: 1.0 = inward dent, -1.0 = outward dent, 0.0 = no dent
+        # For INTERNAL camera: flip sign because inward dent (closer) has negative signed_diff, outward (farther) has positive
         direction_map = np.zeros_like(signed_depth_diff, dtype=np.float32)
-        direction_map[valid_mask & (depth_diff > threshold)] = np.sign(signed_depth_diff[valid_mask & (depth_diff > threshold)])
+        direction_map[valid_mask & (depth_diff > threshold)] = -np.sign(signed_depth_diff[valid_mask & (depth_diff > threshold)])
         
         # Save pure binary mask before morphology operations (after gap-filling, before opening/closing)
         pure_binary_mask = binary_mask.copy()
         
-        # Apply morphological opening (erosion followed by dilation) to remove noise
-        # Opening removes small isolated white regions and smooths boundaries
-        if morphology_opening_size > 0:
-            # Ensure kernel size is odd (required by OpenCV)
-            opening_size = morphology_opening_size
-            if opening_size % 2 == 0:
-                opening_size += 1
-                logger.debug(f"Morphology opening kernel size adjusted to {opening_size} (must be odd)")
+        # Apply morphology operations only if not skipped
+        if not skip_morphology:
+            # Apply morphological opening (erosion followed by dilation) to remove noise
+            # Opening removes small isolated white regions and smooths boundaries
+            if morphology_opening_size > 0:
+                # Ensure kernel size is odd (required by OpenCV)
+                opening_size = morphology_opening_size
+                if opening_size % 2 == 0:
+                    opening_size += 1
+                    logger.debug(f"Morphology opening kernel size adjusted to {opening_size} (must be odd)")
+                
+                opening_kernel = np.ones((opening_size, opening_size), np.uint8)
+                binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, opening_kernel)
             
-            opening_kernel = np.ones((opening_size, opening_size), np.uint8)
-            binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, opening_kernel)
-        
-        # Apply morphological closing (dilation followed by erosion) to fill gaps and connect regions
-        # Closing fills small gaps and thin black lines inside dented regions
-        if morphology_closing_size > 0:
-            # Ensure kernel size is odd (required by OpenCV)
-            closing_size = morphology_closing_size
-            if closing_size % 2 == 0:
-                closing_size += 1
-                logger.debug(f"Morphology closing kernel size adjusted to {closing_size} (must be odd)")
+            # Apply morphological closing (dilation followed by erosion) to fill gaps and connect regions
+            # Closing fills small gaps and thin black lines inside dented regions
+            if morphology_closing_size > 0:
+                # Ensure kernel size is odd (required by OpenCV)
+                closing_size = morphology_closing_size
+                if closing_size % 2 == 0:
+                    closing_size += 1
+                    logger.debug(f"Morphology closing kernel size adjusted to {closing_size} (must be odd)")
+                
+                closing_kernel = np.ones((closing_size, closing_size), np.uint8)
+                binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, closing_kernel)
             
-            closing_kernel = np.ones((closing_size, closing_size), np.uint8)
-            binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, closing_kernel)
-        
-        # Post-morphology aggressive fill: Fill black pixels inside white regions regardless of depth
-        # This catches any remaining black lines that weren't filled by morphological operations
-        binary_mask = self._aggressive_internal_fill(binary_mask, valid_mask)
-        
-        # Fill black holes inside white dented regions
-        binary_mask = self._fill_holes(binary_mask)
-        
-        # Remove small and thin false-positive regions using connected-component analysis
-        binary_mask = self._filter_thin_components(binary_mask, min_area=min_dent_area)
+            # Post-morphology aggressive fill: Fill black pixels inside white regions regardless of depth
+            # This catches any remaining black lines that weren't filled by morphological operations
+            binary_mask = self._aggressive_internal_fill(binary_mask, valid_mask)
+            
+            # Fill black holes inside white dented regions
+            binary_mask = self._fill_holes(binary_mask)
+            
+            # Remove small and thin false-positive regions using connected-component analysis
+            binary_mask = self._filter_thin_components(binary_mask, min_area=min_dent_area)
+        else:
+            # If morphology is skipped, binary_mask remains as pure_binary_mask
+            # This allows caller to apply custom morphology after depth filtering
+            pass
         
         # Update direction map to match final binary mask (only where mask is white)
         direction_map = direction_map * (binary_mask > 0).astype(np.float32)
@@ -560,7 +586,7 @@ class DentComparisonRenderer:
     def _generate_panel_mask_ransac(self, depth: np.ndarray,
                                    residual_threshold: Optional[float] = None,
                                    adaptive_threshold: bool = True,
-                                   max_trials: int = 1000) -> np.ndarray:
+                                   max_trials: int = 1000) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
         Generate a binary panel mask using RANSAC plane fitting.
         
@@ -575,7 +601,9 @@ class DentComparisonRenderer:
             max_trials: Maximum number of RANSAC iterations
             
         Returns:
-            Binary mask (H, W) where True/1.0 = panel pixels (inliers), False/0.0 = other pixels (outliers)
+            Tuple of (panel_mask, plane_coefficients)
+            - panel_mask: Binary mask (H, W) where True/1.0 = panel pixels (inliers), False/0.0 = other pixels (outliers)
+            - plane_coefficients: [a, b, -1, c] where z = ax + by + c in camera space, or None if RANSAC failed
         """
         # Calculate adaptive residual threshold if requested
         if adaptive_threshold and residual_threshold is None:
@@ -588,10 +616,10 @@ class DentComparisonRenderer:
         
         if len(points_3d) == 0:
             logger.warning("No valid points found in depth map for RANSAC")
-            return np.zeros_like(depth, dtype=np.float32)
+            return np.zeros_like(depth, dtype=np.float32), None
         
         # Apply RANSAC plane fitting
-        inlier_mask_points, _ = self._fit_plane_ransac(
+        inlier_mask_points, plane_coefficients = self._fit_plane_ransac(
             points_3d, 
             residual_threshold=residual_threshold,
             max_trials=max_trials
@@ -613,7 +641,120 @@ class DentComparisonRenderer:
         logger.info(f"Panel mask: {np.sum(panel_mask > 0)}/{panel_mask.size} pixels "
                    f"({100*np.sum(panel_mask > 0)/panel_mask.size:.1f}%)")
         
-        return panel_mask
+        return panel_mask, plane_coefficients
+    
+    def _fill_internal_holes(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Fill black holes (dents) inside the white panel mask using external contour filling.
+        
+        RANSAC correctly identifies dents as outliers (not part of the flat plane), creating
+        holes in the mask. This method finds the outer boundary of the panel and fills
+        everything inside it, effectively including dents back into the panel ROI.
+        
+        Strategy: Finds the outer-most boundary (external contour) and fills it solid,
+        which patches all internal holes (dents) instantly.
+        
+        Args:
+            mask: Binary mask (H, W) where 1.0 = panel pixels, 0.0 = background
+            
+        Returns:
+            Filled mask (H, W) with holes filled (float32, 0.0 or 1.0)
+        """
+        # Ensure mask is uint8 (0 or 255) for OpenCV operations
+        mask_uint8 = (mask * 255).astype(np.uint8)
+        
+        # Find contours - RETR_EXTERNAL = Only find the outer-most boundary (ignores inner holes)
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            logger.warning("No contours found in panel mask, returning original mask")
+            return mask
+        
+        # Create a new solid mask
+        filled_mask = np.zeros_like(mask_uint8)
+        
+        # Find the largest contour (The Container Panel)
+        # This filters out tiny noise blobs outside the container
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Draw it SOLID (thickness = cv2.FILLED or -1)
+        # This paints the entire shape white, erasing any internal black holes
+        cv2.drawContours(filled_mask, [largest_contour], -1, 255, thickness=cv2.FILLED)
+        
+        # Count how many pixels were filled
+        pixels_before = np.sum(mask > 0)
+        pixels_after = np.sum(filled_mask > 0)
+        pixels_filled = pixels_after - pixels_before
+        
+        if pixels_filled > 0:
+            logger.info(f"    Filled {pixels_filled} pixels ({100*pixels_filled/pixels_before:.1f}% increase) "
+                       f"to patch holes in panel mask")
+        
+        # Convert back to float (0.0 / 1.0) for consistency
+        return (filled_mask > 0).astype(np.float32)
+    
+    def _get_main_panel_mask(self, ransac_mask: np.ndarray,
+                            erosion_kernel_size: int = 7, 
+                            erosion_iterations: int = 3) -> np.ndarray:
+        """
+        Refines the RANSAC mask to keep ONLY the Main Panel, 
+        removing connected bars/frames at the edges.
+        
+        This method implements a 'Largest Connected Component' filter:
+        1. Erodes the mask to break connections between panel and frame
+        2. Finds all connected components
+        3. Keeps only the largest blob (the main panel)
+        4. Discards all smaller blobs (bars/frames)
+        
+        Args:
+            ransac_mask: Binary mask (H, W) from RANSAC, where 1.0 = panel pixels
+            erosion_kernel_size: Size of erosion kernel to break connections (default: 7x7)
+            erosion_iterations: Number of erosion iterations (default: 3)
+        
+        Returns:
+            main_panel_mask: Binary mask (H, W) containing only the largest connected component
+        """
+        # Step 1: Convert to uint8 for OpenCV operations
+        mask_uint8 = (ransac_mask > 0).astype(np.uint8) * 255
+        
+        # Step 2: ERODE - Break the links between Panel and Frame
+        # A larger kernel ensures we snap thin connections between panel and frame
+        kernel = np.ones((erosion_kernel_size, erosion_kernel_size), np.uint8)
+        # Aggressive shrinking to ensure separation
+        eroded = cv2.erode(mask_uint8, kernel, iterations=erosion_iterations)
+        
+        # Step 3: CONNECTED COMPONENTS - Find all separate objects
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(eroded, connectivity=8)
+        
+        # Step 4: FILTER - Find the Largest Component (The Panel)
+        # stats[:, cv2.CC_STAT_AREA] is the Area
+        # Label 0 is background, so we skip it
+        if num_labels < 2:
+            logger.warning("No objects found after erosion, using original RANSAC mask as fallback")
+            return ransac_mask
+        
+        # Find index of largest blob (skipping background at index 0)
+        # stats[1:, cv2.CC_STAT_AREA] gets areas of all non-background components
+        largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+        largest_area = stats[largest_label, cv2.CC_STAT_AREA]
+        
+        logger.info(f"Found {num_labels-1} connected components after erosion. "
+                   f"Largest component (label {largest_label}) has {largest_area} pixels")
+        
+        # Create mask for ONLY the largest blob
+        main_panel_mask = (labels == largest_label).astype(np.float32)
+        
+        # Log refinement statistics
+        original_pixels = np.sum(ransac_mask > 0)
+        refined_pixels = np.sum(main_panel_mask > 0)
+        logger.info(f"Panel mask refinement: {original_pixels} -> {refined_pixels} pixels "
+                   f"({100*refined_pixels/max(original_pixels,1):.1f}% retained)")
+        
+        # Note: We do NOT dilate back to restore size
+        # Keeping it eroded acts as a natural "Safety Margin" away from the bars/frames
+        # This ensures we are definitely on the main panel, not near frame connections
+        
+        return main_panel_mask
     
     def _apply_mask_to_depth(self, depth: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """
@@ -629,6 +770,103 @@ class DentComparisonRenderer:
         # Use multiplication: masked_depth = depth * mask
         masked_depth = depth * mask
         return masked_depth
+
+    def _create_sanitized_mask(self, panel_mask: np.ndarray, original_depth: np.ndarray, 
+                               dented_depth: np.ndarray, erosion_kernel_size: int = 5, 
+                               depth_consistency_threshold: float = 0.1,
+                               opening_kernel_size: int = 5,
+                               final_erosion_iterations: int = 1) -> np.ndarray:
+        """
+        Create a sanitized mask using intersection logic to handle misalignment artifacts at container edges.
+        
+        This method implements a 'Sanitization Intersection' step that:
+        1. Starts with the RANSAC-generated panel_mask as the base
+        2. Erodes edges to remove edge noise
+        3. Filters out pixels where dented_depth <= 0 (panel moved and exposed background)
+        4. Filters out pixels where depth difference exceeds threshold (ghost dents from background wall)
+        5. Applies morphological opening to smooth edges and remove noise islands
+        6. Applies final safety erosion to create a clean buffer away from edge artifacts
+        
+        Args:
+            panel_mask: Binary mask (H, W) from RANSAC plane fitting, where 1.0 = panel pixels
+            original_depth: Original depth map (H, W) in meters
+            dented_depth: Dented depth map (H, W) in meters
+            erosion_kernel_size: Size of initial erosion kernel (default: 5x5)
+            depth_consistency_threshold: Maximum allowed depth difference in meters (default: 0.5)
+            opening_kernel_size: Size of kernel for morphological opening (default: 5x5)
+            final_erosion_iterations: Number of iterations for final safety erosion (default: 1)
+        
+        Returns:
+            final_safe_mask: Binary mask (H, W) where 1.0 = valid overlapping surface pixels
+        """
+        # Step 1: Start with the original RANSAC panel mask
+        final_safe_mask = panel_mask.copy()
+        
+        # Step 2: Erode edges to remove edge noise
+        # Convert mask to uint8 for cv2 operations (0 or 255)
+        mask_uint8 = (final_safe_mask * 255).astype(np.uint8)
+        erosion_kernel = np.ones((erosion_kernel_size, erosion_kernel_size), np.uint8)
+        eroded_mask = cv2.erode(mask_uint8, erosion_kernel, iterations=1)
+        # Convert back to float (0.0 or 1.0)
+        final_safe_mask = (eroded_mask / 255.0).astype(np.float32)
+        
+        # Step 3: Check dented_depth > 0 (filters out where panel moved and exposed background)
+        valid_dented_mask = (dented_depth > 0) & np.isfinite(dented_depth)
+        final_safe_mask = final_safe_mask * valid_dented_mask.astype(np.float32)
+        
+        # Step 4: Check depth consistency ONLY at edges (not in internal regions where dents are)
+        # This removes 'Ghost Dents' at edges caused by camera seeing distant background wall through a gap
+        # But preserves internal holes (dents) that were filled by _fill_internal_holes()
+        depth_diff = np.abs(original_depth - dented_depth)
+        
+        # Identify edge regions: pixels near the boundary of the panel mask
+        # Edge regions are where ghost dents occur, internal regions contain real dents
+        mask_uint8_for_edge = (final_safe_mask * 255).astype(np.uint8)
+        # Dilate to find edge region (boundary + small buffer)
+        edge_buffer = 10  # pixels from edge
+        edge_kernel = np.ones((edge_buffer * 2 + 1, edge_buffer * 2 + 1), np.uint8)
+        dilated_mask = cv2.dilate(mask_uint8_for_edge, edge_kernel, iterations=1)
+        # Edge region = dilated area - original mask (boundary region)
+        edge_region = (dilated_mask > 0) & (mask_uint8_for_edge == 0)
+        
+        # Apply depth consistency check ONLY to edge regions
+        # Internal regions (where dents are) are preserved regardless of depth difference
+        depth_consistent_mask = np.ones_like(final_safe_mask, dtype=bool)
+        if np.any(edge_region):
+            # At edges: filter out large depth differences (ghost dents from background)
+            edge_depth_consistent = (depth_diff < depth_consistency_threshold) & np.isfinite(depth_diff)
+            depth_consistent_mask[edge_region] = edge_depth_consistent[edge_region]
+            # Internal regions: keep all pixels (preserve filled dents)
+            # depth_consistent_mask[~edge_region] remains True (already set above)
+        
+        final_safe_mask = final_safe_mask * depth_consistent_mask.astype(np.float32)
+        
+        # Ensure original_depth is also valid (finite and > 0) for the final mask
+        valid_original_mask = (original_depth > 0) & np.isfinite(original_depth)
+        final_safe_mask = final_safe_mask * valid_original_mask.astype(np.float32)
+        
+        # Step 5: Morphological smoothing to remove noise islands and smooth jagged edges
+        # Convert to uint8 for OpenCV operations
+        raw_safe_mask_uint8 = (final_safe_mask * 255).astype(np.uint8)
+        
+        # Step 5A: Morphological Opening (Erosion -> Dilation)
+        # This removes small "islands" (broken floating pixels) and smooths sharp spikes
+        # Opening removes noise islands and creates clean, smooth edges
+        opening_kernel = np.ones((opening_kernel_size, opening_kernel_size), np.uint8)
+        smoothed_mask = cv2.morphologyEx(raw_safe_mask_uint8, cv2.MORPH_OPEN, opening_kernel)
+        
+        # Step 5B: Final Safety Erosion
+        # Shrink the mask slightly to create a safety buffer away from edge artifacts
+        # This ensures we are definitely on solid metal, not near dangerous edge regions
+        if final_erosion_iterations > 0:
+            final_clean_mask = cv2.erode(smoothed_mask, opening_kernel, iterations=final_erosion_iterations)
+        else:
+            final_clean_mask = smoothed_mask
+        
+        # Convert back to float (0.0 or 1.0)
+        final_safe_mask = (final_clean_mask / 255.0).astype(np.float32)
+        
+        return final_safe_mask
 
     def _aggressive_internal_fill(self, binary_mask: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
         """
@@ -847,16 +1085,6 @@ class DentComparisonRenderer:
                 np.save(original_depth_raw_path, original_depth.astype(np.float32))
                 np.save(dented_depth_raw_path, dented_depth.astype(np.float32))
                 
-                # Save raw dented depth map to dataset folder ONLY for testset generation
-                if is_testset:
-                    if dataset_dir is None:
-                        dataset_dir = Path("output_scene_dataset")
-                    dataset_dir.mkdir(parents=True, exist_ok=True)
-                    
-                    dataset_dented_depth_raw_path = dataset_dir / f"{base_name}_{shot_name}_dented_depth_raw.npy"
-                    np.save(dataset_dented_depth_raw_path, dented_depth.astype(np.float32))
-                    logger.info(f"    ✓ Saved raw dented depth map (before RANSAC): {base_name}_{shot_name}_dented_depth_raw.npy")
-                
                 # Apply Gaussian smoothing to flatten corrugation pattern before RANSAC
                 # Automatically tune sigma based on depth variance
                 logger.info(f"    Applying Gaussian smoothing with adaptive sigma to flatten corrugation pattern...")
@@ -866,46 +1094,146 @@ class DentComparisonRenderer:
                 # Apply RANSAC plane fitting to detect main panel surface (using smoothed original depth map)
                 # Use adaptive residual threshold to include all corrugations (upper and lower)
                 logger.info(f"    Applying RANSAC plane fitting to detect main panel surface...")
-                panel_mask = self._generate_panel_mask_ransac(
+                raw_panel_mask, plane_coefficients = self._generate_panel_mask_ransac(
                     original_depth_smoothed,
                     adaptive_threshold=True,  # Automatically tune threshold based on corrugation depth
                     max_trials=1000
                 )
                 
-                # Apply panel mask to both original (unsmoothed) depth maps for accurate dent measurement
-                original_depth_masked = self._apply_mask_to_depth(original_depth, panel_mask)
-                dented_depth_masked = self._apply_mask_to_depth(dented_depth, panel_mask)
+                # Fill internal holes (dents) that RANSAC correctly identified as outliers
+                # RANSAC creates holes at dent locations because dents are not part of the flat plane
+                # This step fills those holes so dents are included in the panel ROI
+                logger.info(f"    Filling internal holes (dents) in panel mask...")
+                filled_panel_mask = self._fill_internal_holes(raw_panel_mask)
+                
+                # Refine filled mask to keep ONLY the main panel, excluding bars/frames at edges
+                logger.info(f"    Refining panel mask to exclude edge cases (bars/frames)...")
+                panel_mask = self._get_main_panel_mask(
+                    filled_panel_mask,  # Use filled mask (with dents included)
+                    erosion_kernel_size=7,
+                    erosion_iterations=3
+                )
+                
+                # Create sanitized mask using intersection logic to handle misalignment artifacts at edges
+                logger.info(f"    Creating sanitized mask to handle edge misalignment artifacts...")
+                final_safe_mask = self._create_sanitized_mask(
+                    panel_mask, original_depth, dented_depth,
+                    erosion_kernel_size=5,
+                    depth_consistency_threshold=0.1
+                )
+                
+                # Log mask statistics
+                panel_pixels = np.sum(panel_mask > 0)
+                safe_pixels = np.sum(final_safe_mask > 0)
+                logger.info(f"    Panel mask: {panel_pixels} pixels, Safe mask: {safe_pixels} pixels "
+                           f"({100*safe_pixels/max(panel_pixels,1):.1f}% retained)")
+                
+                # Apply sanitized mask to both original (unsmoothed) depth maps for accurate dent measurement
+                # This ensures we calculate difference only on valid overlapping surface
+                original_depth_masked = self._apply_mask_to_depth(original_depth, final_safe_mask)
+                dented_depth_masked = self._apply_mask_to_depth(dented_depth, final_safe_mask)
                 
                 # Compare depths using masked depth maps to detect dent locations
                 # This initial comparison identifies where dents are
-                depth_diff_initial, dent_mask, pure_dent_mask, direction_map = self.compare_depths(original_depth_masked, dented_depth_masked, threshold)
+                # Skip morphology here since we'll apply it after depth filtering
+                depth_diff_initial, dent_mask_unused, pure_dent_mask, direction_map = self.compare_depths(
+                    original_depth_masked, dented_depth_masked, threshold, skip_morphology=True
+                )
                 
-                # Filter dent segments by minimum area threshold
+                # Calculate depth relative to median panel depth using pure_mask (before morphology)
+                # This provides accurate depth measurement for filtering segments
+                # Use RANSAC plane depth to eliminate perspective distortion
+                # Use original depth map to calculate median for accurate dent depth measurement
+                logger.info(f"    Calculating depth relative to median panel depth (for pure mask filtering)...")
+                empty_mask = np.zeros_like(pure_dent_mask, dtype=np.uint8)
+                median_panel_depth = self._calculate_median_panel_depth(original_depth_masked, empty_mask, final_safe_mask, plane_coefficients)
+                logger.info(f"    Median panel depth: {median_panel_depth:.4f}m ({median_panel_depth*1000:.2f}mm)")
+                depth_diff_median = self._calculate_depth_diff_from_median(dented_depth_masked, pure_dent_mask, final_safe_mask, plane_coefficients, original_depth_map=original_depth_masked)
+                
+                # Filter pure_mask segments by minimum depth threshold (10mm) before morphology operations
+                # Compare each segment to median depth of its local corrugation wall
+                logger.info(f"    Filtering pure mask segments by minimum depth threshold: 10mm (relative to local corrugation wall)")
+                valid_mask = (dented_depth_masked > 0) & np.isfinite(dented_depth_masked)
+                filtered_pure_mask, depth_filtered_segments = self._filter_segments_by_depth(
+                    pure_dent_mask, dented_depth_masked, depth_diff_median, direction_map, 
+                    panel_mask=final_safe_mask, min_depth_mm=10.0, shot_name=shot_name
+                )
+                
+                # Log depth filtering results
+                num_segments_before_depth = len(self._analyze_dent_segments(
+                    pure_dent_mask, dented_depth_masked, depth_diff_median, direction_map,
+                    shot_name=shot_name
+                ))
+                num_segments_after_depth = len(depth_filtered_segments)
+                logger.info(f"    Segments before depth filtering: {num_segments_before_depth}, after depth filtering (>=10mm): {num_segments_after_depth}")
+                
+                # Apply morphology operations to depth-filtered pure_mask
+                logger.info(f"    Applying morphology operations to depth-filtered mask...")
+                dent_mask = self._apply_morphology_operations(
+                    filtered_pure_mask, valid_mask,
+                    morphology_opening_size=9,
+                    morphology_closing_size=11,
+                    min_dent_area=200
+                )
+                
+                # Filter dent segments by minimum area threshold (after morphology)
                 logger.info(f"    Filtering dent segments by minimum area threshold: {min_area_cm2} cm²")
                 filtered_dent_mask, dent_segments = self._filter_segments_by_area(
-                    dent_mask, dented_depth_masked, depth_diff_initial, direction_map, min_area_cm2
+                    dent_mask, dented_depth_masked, depth_diff_median, direction_map, min_area_cm2,
+                    shot_name=shot_name
                 )
                 
                 # Log filtering results
-                num_segments_before = len(self._analyze_dent_segments(dent_mask, dented_depth_masked, depth_diff_initial, direction_map))
-                num_segments_after = len(dent_segments)
-                logger.info(f"    Segments before filtering: {num_segments_before}, after filtering: {num_segments_after}")
+                num_segments_before_area = len(self._analyze_dent_segments(
+                    dent_mask, dented_depth_masked, depth_diff_median, direction_map,
+                    shot_name=shot_name
+                ))
+                num_segments_after_area = len(dent_segments)
+                logger.info(f"    Segments before area filtering: {num_segments_before_area}, after filtering: {num_segments_after_area}")
                 
                 # Use filtered mask for all subsequent operations
                 dent_mask = filtered_dent_mask
                 
-                # Recalculate depth difference relative to median panel depth
-                # This provides more accurate depth measurement by comparing to the "normal" panel surface
-                logger.info(f"    Calculating depth relative to median panel depth...")
-                median_panel_depth = self._calculate_median_panel_depth(dented_depth_masked, dent_mask, panel_mask)
-                logger.info(f"    Median panel depth: {median_panel_depth:.4f}m ({median_panel_depth*1000:.2f}mm)")
-                depth_diff = self._calculate_depth_diff_from_median(dented_depth_masked, dent_mask, panel_mask)
+                # Calculate raw depth difference: |dented_depth - original_depth|
+                # This is the direct comparison between original and dented NPY files
+                logger.info(f"    Calculating raw depth difference (original vs dented)...")
+                depth_diff_raw = np.abs(dented_depth_masked - original_depth_masked)
                 
-                # Re-analyze segments with median-based depth_diff for accurate depth measurements
-                dent_segments = self._analyze_dent_segments(dent_mask, dented_depth_masked, depth_diff, direction_map)
-                # Filter segments again by area threshold (using median-based depth_diff)
+                # Also calculate depth difference relative to median panel depth (for accurate dent measurement)
+                # Use RANSAC plane depth to eliminate perspective distortion
+                # Use original depth map to calculate median for accurate dent depth measurement
+                logger.info(f"    Calculating depth relative to median panel depth (for dent analysis)...")
+                empty_mask = np.zeros_like(dent_mask, dtype=np.uint8)
+                median_panel_depth = self._calculate_median_panel_depth(original_depth_masked, empty_mask, final_safe_mask, plane_coefficients)
+                logger.info(f"    Median panel depth: {median_panel_depth:.4f}m ({median_panel_depth*1000:.2f}mm)")
+                depth_diff_median = self._calculate_depth_diff_from_median(dented_depth_masked, dent_mask, final_safe_mask, plane_coefficients, original_depth_map=original_depth_masked)
+                
+                # Use raw depth difference for visualization (what user wants to see)
+                depth_diff = depth_diff_raw
+                
+                # Analyze segments with all depth measurements calculated per segment
+                dent_segments = self._analyze_dent_segments(
+                    dent_mask=dent_mask,
+                    dented_depth_map=dented_depth_masked,
+                    depth_diff_median=depth_diff_median,  # Use median-based depth diff for analysis
+                    direction_map=direction_map,
+                    original_depth_map=original_depth_masked,
+                    depth_diff_original_vs_dented=depth_diff_initial,  # Raw difference for comparison
+                    median_panel_depth=median_panel_depth,
+                    panel_mask=final_safe_mask,
+                    dilation_radius=30,
+                    shot_name=shot_name
+                )
+                # Filter segments again by area threshold
                 filtered_segments = [seg for seg in dent_segments if seg['area_cm2'] >= min_area_cm2]
                 dent_segments = filtered_segments
+                
+                # Calculate max_depth_diff_mm for this snapshot (for dataset filtering)
+                max_depth_diff_mm_snapshot = 0.0
+                if len(dent_segments) > 0:
+                    max_depth_diffs = [seg.get('max_depth_diff_mm', 0) for seg in dent_segments]
+                    if max_depth_diffs:
+                        max_depth_diff_mm_snapshot = float(max(max_depth_diffs))
                 
                 # Render RGB for saving (needed for visual output generation later)
                 original_rgb, _ = self._render_rgb(original_mesh, pose)
@@ -920,20 +1248,42 @@ class DentComparisonRenderer:
                 np.save(dented_depth_path, dented_depth_masked.astype(np.float32))
                 
                 # Also save to dataset folder for training (directly in dataset_dir, no subfolders)
-                if dataset_dir is None:
-                    dataset_dir = Path("output_scene_dataset")
-                dataset_dir.mkdir(parents=True, exist_ok=True)
+                # Filter: Skip saving to dataset if max_depth_diff_mm > 80mm
+                if max_depth_diff_mm_snapshot <= 80.0:
+                    if dataset_dir is None:
+                        dataset_dir = Path("output_scene_dataset")
+                    dataset_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Save raw dented depth map to dataset folder ONLY for testset generation
+                    if is_testset:
+                        dataset_dented_depth_raw_path = dataset_dir / f"{base_name}_{shot_name}_dented_depth_raw.npy"
+                        np.save(dataset_dented_depth_raw_path, dented_depth.astype(np.float32))
+                        logger.info(f"    ✓ Saved raw dented depth map (before RANSAC): {base_name}_{shot_name}_dented_depth_raw.npy")
+                    
+                    # Save files directly in dataset_dir with full name including shot_name
+                    dataset_dented_depth_path = dataset_dir / f"{base_name}_{shot_name}_dented_depth.npy"
+                    np.save(dataset_dented_depth_path, dented_depth_masked.astype(np.float32))
                 
-                # Save files directly in dataset_dir with full name including shot_name
-                dataset_dented_depth_path = dataset_dir / f"{base_name}_{shot_name}_dented_depth.npy"
-                np.save(dataset_dented_depth_path, dented_depth_masked.astype(np.float32))
+                # Save raw panel mask from RANSAC (before refinement) for debugging
+                raw_panel_mask_path = shot_output_dir / f"{base_name}_panel_mask_raw.npy"
+                np.save(raw_panel_mask_path, raw_panel_mask.astype(np.float32))  # Save as float (0 or 1)
+                # Convert to uint8 (0 or 255) for PNG visualization
+                raw_panel_mask_uint8 = (raw_panel_mask * 255).astype(np.uint8)
+                imageio.imwrite(shot_output_dir / f"{base_name}_panel_mask_raw.png", raw_panel_mask_uint8)
                 
-                # Save panel mask from RANSAC
+                # Save refined panel mask (after largest connected component filtering)
                 panel_mask_path = shot_output_dir / f"{base_name}_panel_mask.npy"
                 np.save(panel_mask_path, panel_mask.astype(np.float32))  # Save as float (0 or 1)
                 # Convert to uint8 (0 or 255) for PNG visualization
                 panel_mask_uint8 = (panel_mask * 255).astype(np.uint8)
                 imageio.imwrite(shot_output_dir / f"{base_name}_panel_mask.png", panel_mask_uint8)
+                
+                # Save sanitized safe mask for debugging
+                safe_mask_path = shot_output_dir / f"{base_name}_safe_mask.npy"
+                np.save(safe_mask_path, final_safe_mask.astype(np.float32))  # Save as float (0 or 1)
+                # Convert to uint8 (0 or 255) for PNG visualization
+                safe_mask_uint8 = (final_safe_mask * 255).astype(np.uint8)
+                imageio.imwrite(shot_output_dir / f"{base_name}_safe_mask.png", safe_mask_uint8)
                 
                 # Save debug visualization images for panel extraction pipeline
                 logger.info(f"    Saving debug visualization images...")
@@ -978,6 +1328,29 @@ class DentComparisonRenderer:
                 except Exception as e:
                     logger.warning(f"    ⚠️  Failed to generate point clouds: {e}")
                 
+                # Validity check: ensure dent_mask never labels empty space (depth=0) as a dent
+                # Map dent_mask onto dented_depth_masked and check for invalid pixels
+                logger.info(f"    Performing validity check on dent_mask...")
+                invalid_pixels = (dent_mask > 0) & (dented_depth_masked == 0)
+                num_invalid_pixels = np.sum(invalid_pixels)
+                if num_invalid_pixels > 0:
+                    logger.warning(f"    ⚠️  Found {num_invalid_pixels} invalid pixels (dent_mask=1 but dented_depth=0), removing from mask")
+                    dent_mask[invalid_pixels] = 0
+                    logger.info(f"    ✓ Validity check complete: removed {num_invalid_pixels} invalid pixels")
+                else:
+                    logger.info(f"    ✓ Validity check passed: no invalid pixels found")
+                
+                # Apply sanitized safe_mask to dent_mask to ensure we don't label non-panel regions or edge artifacts as dents
+                logger.info(f"    Applying sanitized safe_mask to dent_mask...")
+                dent_mask_before_panel = dent_mask.copy()
+                # Apply final_safe_mask: set dent_mask to 0 where final_safe_mask is 0 (non-panel regions or edge artifacts)
+                dent_mask[final_safe_mask == 0] = 0
+                num_removed_by_panel = np.sum((dent_mask_before_panel > 0) & (dent_mask == 0))
+                if num_removed_by_panel > 0:
+                    logger.info(f"    ✓ Safe mask applied: removed {num_removed_by_panel} pixels outside safe region")
+                else:
+                    logger.info(f"    ✓ Safe mask applied: all dent pixels are within safe region")
+                
                 # Save binary mask: WHITE (255) = dented areas (different depth), BLACK (0) = normal areas (same depth)
                 imageio.imwrite(shot_output_dir / f"{base_name}_dent_mask.png", dent_mask)
                 
@@ -1012,85 +1385,67 @@ class DentComparisonRenderer:
                     dataset_dir = Path("output_scene_dataset")
                 dataset_dir.mkdir(parents=True, exist_ok=True)
                 
-                # Always save dent mask and masked depth for training (both regular and testset)
-                dataset_dent_mask_path = dataset_dir / f"{base_name}_{shot_name}_dent_mask.png"
-                imageio.imwrite(dataset_dent_mask_path, dent_mask)
+                # Filter: Skip saving to dataset if max_depth_diff_mm > 80mm
+                if max_depth_diff_mm_snapshot > 80.0:
+                    logger.info(f"    ⚠️  Skipping dataset save: max_depth_diff_mm ({max_depth_diff_mm_snapshot:.2f}mm) > 80mm")
+                else:
+                    # Always save dent mask and masked depth for training (both regular and testset)
+                    dataset_dent_mask_path = dataset_dir / f"{base_name}_{shot_name}_dent_mask.png"
+                    imageio.imwrite(dataset_dent_mask_path, dent_mask)
+                    
+                    # Save mask as NPY for DL training (binary float32: 0.0 = background, 1.0 = dent)
+                    # Convert from uint8 (0/255) to float32 (0.0/1.0) for consistency with depth maps
+                    dataset_dent_mask_npy_path = dataset_dir / f"{base_name}_{shot_name}_dent_mask.npy"
+                    dent_mask_binary = (dent_mask > 127).astype(np.float32)
+                    np.save(dataset_dent_mask_npy_path, dent_mask_binary)
+                    logger.info(f"    ✓ Saved dent mask (NPY) to dataset: {base_name}_{shot_name}_dent_mask.npy")
+                    
+                    # Save RGB image to dataset folder ONLY for testset generation
+                    if is_testset or save_rgb_to_dataset:
+                        dataset_rgb_path = dataset_dir / f"{base_name}_{shot_name}_rgb.png"
+                        imageio.imwrite(dataset_rgb_path, dented_rgb)
+                        logger.info(f"    ✓ Saved RGB image to dataset: {base_name}_{shot_name}_rgb.png")
+                    
+                    # Save dent segment JSON to dataset folder (always save, matches other dataset files)
+                    dataset_segment_json_path = dataset_dir / f"{base_name}_{shot_name}_dent_segments.json"
+                    with open(dataset_segment_json_path, 'w') as f:
+                        json.dump(segment_data, f, indent=2)
+                    logger.info(f"    ✓ Saved dent segment JSON to dataset: {base_name}_{shot_name}_dent_segments.json")
                 
-                # Save mask as NPY for DL training (binary float32: 0.0 = background, 1.0 = dent)
-                # Convert from uint8 (0/255) to float32 (0.0/1.0) for consistency with depth maps
-                dataset_dent_mask_npy_path = dataset_dir / f"{base_name}_{shot_name}_dent_mask.npy"
-                dent_mask_binary = (dent_mask > 127).astype(np.float32)
-                np.save(dataset_dent_mask_npy_path, dent_mask_binary)
-                logger.info(f"    ✓ Saved dent mask (NPY) to dataset: {base_name}_{shot_name}_dent_mask.npy")
-                
-                # Save RGB image to dataset folder ONLY for testset generation
-                if is_testset or save_rgb_to_dataset:
-                    dataset_rgb_path = dataset_dir / f"{base_name}_{shot_name}_rgb.png"
-                    imageio.imwrite(dataset_rgb_path, dented_rgb)
-                    logger.info(f"    ✓ Saved RGB image to dataset: {base_name}_{shot_name}_rgb.png")
-                
-                # Save dent segment JSON to dataset folder (always save, matches other dataset files)
-                dataset_segment_json_path = dataset_dir / f"{base_name}_{shot_name}_dent_segments.json"
-                with open(dataset_segment_json_path, 'w') as f:
-                    json.dump(segment_data, f, indent=2)
-                logger.info(f"    ✓ Saved dent segment JSON to dataset: {base_name}_{shot_name}_dent_segments.json")
-                
-                # Calculate statistics
+                # Calculate basic statistics
                 dent_pixels = np.sum(dent_mask > 0)
                 total_pixels = dent_mask.size
                 dent_percentage = (dent_pixels / total_pixels) * 100 if total_pixels > 0 else 0
                 
-                # Extract dent-depth values (where mask indicates dents)
-                dent_depth_values = self._extract_dent_depths(depth_diff, dent_mask, threshold)
-                
-                # Calculate raw statistics (before filtering)
-                raw_max_diff_m = np.max(dent_depth_values) if len(dent_depth_values) > 0 else 0.0
-                raw_max_diff_mm = raw_max_diff_m * 1000.0
-                
-                # Filter unrealistic dent depths using robust outlier rejection
-                filtered_dent_depths = self._filter_dent_depths_outliers(dent_depth_values)
-                
-                # Calculate filtered statistics (after filtering)
-                filtered_max_diff_m = np.max(filtered_dent_depths) if len(filtered_dent_depths) > 0 else 0.0
-                filtered_max_diff_mm = filtered_max_diff_m * 1000.0
-                
-                # Check if filtered max depth exceeds 200mm threshold
-                # If it does, use the raw detected depth instead of the filtered value
-                if filtered_max_diff_mm > 200.0:
-                    filtered_max_diff_m = raw_max_diff_m
-                    filtered_max_diff_mm = raw_max_diff_mm
-                    logger.info(f"    ✓ Dent mask: {dent_pixels} pixels ({dent_percentage:.1f}%)")
-                    logger.info(f"    ✓ Max depth (vs median panel): {raw_max_diff_mm:.2f}mm")
-                    logger.info(f"    ✓ Filtered max depth: {filtered_max_diff_mm:.2f}mm (using raw value, filtered exceeded 200mm)")
-                else:
-                    logger.info(f"    ✓ Dent mask: {dent_pixels} pixels ({dent_percentage:.1f}%)")
-                    logger.info(f"    ✓ Max depth (vs median panel): {raw_max_diff_mm:.2f}mm")
-                    logger.info(f"    ✓ Filtered max depth: {filtered_max_diff_mm:.2f}mm")
-                
                 # Calculate camera distance from panel
-                # For regular shots: distance from camera to panel
-                # For corner shots: distance from panel towards corner pole
                 camera_distance_m = self._calculate_camera_distance(pose)
                 
-                # Calculate dent area in cm² from mask pixels
-                # Count pixels where mask = 1 (dented pixels) and convert to real-world area
-                # Use masked depth map for area calculation
+                # Calculate total dent area in cm²
                 dent_area_cm2 = self._calculate_dent_area(dent_mask, dented_depth_masked)
                 
+                # Calculate max dent depth across all segments in this snapshot
+                max_dent_depth_mm = 0.0
+                if len(dent_segments) > 0:
+                    max_depths = [seg.get('max_depth_diff_vs_median_panel_mm', 0) for seg in dent_segments]
+                    if max_depths:
+                        max_dent_depth_mm = float(max(max_depths))
+                
+                # Log summary statistics
+                logger.info(f"    ✓ Dent mask: {dent_pixels} pixels ({dent_percentage:.1f}%)")
+                logger.info(f"    ✓ Total dent area: {dent_area_cm2:.2f} cm²")
+                logger.info(f"    ✓ Number of segments: {len(dent_segments)}")
+                if max_dent_depth_mm > 0:
+                    logger.info(f"    ✓ Max dent depth (vs median panel): {max_dent_depth_mm:.2f}mm")
+                
+                # Add to results summary (basic stats only, detailed depth measurements are in segment JSON)
                 results.append({
                     'shot_name': shot_name,
                     'dent_pixels': int(dent_pixels),
                     'total_pixels': int(total_pixels),
                     'dent_percentage': float(dent_percentage),
-                    # Depth measurement reference (median panel depth)
                     'median_panel_depth_m': float(median_panel_depth),
                     'median_panel_depth_mm': float(median_panel_depth * 1000),
-                    # Raw statistics (before filtering) - depth relative to median panel
-                    'max_depth_diff_m_raw': float(raw_max_diff_m),
-                    'max_depth_diff_mm_raw': float(raw_max_diff_mm),
-                    # Filtered statistics (after outlier removal, uses raw value if filtered exceeds 200mm)
-                    'max_depth_diff_m': float(filtered_max_diff_m),
-                    'max_depth_diff_mm': float(filtered_max_diff_mm),
+                    'max_dent_depth_mm': float(max_dent_depth_mm),
                     'dent_area_cm2': float(dent_area_cm2),
                     'num_segments': len(dent_segments),
                     'camera_distance_m': float(camera_distance_m),
@@ -1539,31 +1894,44 @@ class DentComparisonRenderer:
         
         return width_cm, length_cm
     
-    def _analyze_dent_segments(self, dent_mask: np.ndarray, depth_map: np.ndarray, 
-                               depth_diff: np.ndarray, direction_map: np.ndarray) -> list:
+    def _analyze_dent_segments(self, dent_mask: np.ndarray, dented_depth_map: np.ndarray, 
+                               depth_diff_median: np.ndarray, direction_map: np.ndarray,
+                               original_depth_map: Optional[np.ndarray] = None,
+                               depth_diff_original_vs_dented: Optional[np.ndarray] = None,
+                               median_panel_depth: Optional[float] = None,
+                               panel_mask: Optional[np.ndarray] = None,
+                               dilation_radius: int = 30,
+                               shot_name: Optional[str] = None) -> list:
         """
-        Analyze dent segments (connected components) and calculate properties for each.
+        Analyze dent segments (connected components) and calculate properties for each segment.
+        
+        Calculates three types of depth measurements for each segment:
+        1. Original vs Dented depth difference
+        2. Depth difference vs Median Panel Depth (raw and filtered)
+        3. Depth difference vs Local Corrugation Median
         
         Args:
             dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
-            depth_map: Depth map (H, W) in meters (dented depth)
-            depth_diff: Depth difference map (H, W) in meters
+            dented_depth_map: Depth map (H, W) in meters (dented depth)
+            depth_diff_median: Depth difference map (H, W) in meters (relative to median panel)
             direction_map: Direction map (H, W) where 1.0 = inward, -1.0 = outward, 0.0 = no dent
+            original_depth_map: Optional original depth map for original vs dented comparison
+            depth_diff_original_vs_dented: Optional depth difference map (original vs dented)
+            median_panel_depth: Optional median panel depth value
+            panel_mask: Optional panel mask (H, W) where True/1.0 = panel region
+            dilation_radius: Radius in pixels for local corrugation calculation (default: 30)
+            shot_name: Optional shot name (e.g., "internal_back_wall") - used to determine depth calculation method
             
         Returns:
-            List of dictionaries containing segment information:
-            - segment_id: Unique ID for the segment
-            - area_cm2: Area in cm²
-            - pixel_count: Number of pixels in segment
-            - centroid: (x, y) centroid in pixel coordinates
-            - bbox: Bounding box (x, y, width, height)
-            - avg_depth_m: Average depth in meters
-            - max_depth_diff_m: Maximum depth difference in meters
-            - max_depth_diff_mm: Maximum depth difference in mm
-            - direction: 'inward' or 'outward' (dominant direction in segment)
-            - direction_ratio: Ratio of inward pixels (1.0 = all inward, 0.0 = all outward)
+            List of dictionaries containing segment information with all depth measurements
         """
         h, w = dent_mask.shape
+        
+        # Calculate global median depth of entire wall (for wave classification)
+        global_median_depth = self._calculate_global_median_depth(
+            dented_depth_map, dent_mask, panel_mask
+        )
+        logger.debug(f"Global median depth: {global_median_depth:.4f}m ({global_median_depth*1000:.2f}mm)")
         
         # Find connected components (segments)
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
@@ -1581,23 +1949,81 @@ class DentComparisonRenderer:
             centroid_x, centroid_y = centroids[label_id]
             
             # Calculate area in cm² using camera intrinsics
-            area_cm2 = self._calculate_segment_area(segment_mask.astype(np.uint8) * 255, depth_map)
+            area_cm2 = self._calculate_segment_area(segment_mask.astype(np.uint8) * 255, dented_depth_map)
             
             # Calculate width and length in cm using camera intrinsics
             width_cm, length_cm = self._calculate_segment_dimensions(
-                segment_mask.astype(np.uint8) * 255, depth_map, (x, y, width, height)
+                segment_mask.astype(np.uint8) * 255, dented_depth_map, (x, y, width, height)
             )
             
             # Get depth values for this segment
-            segment_depths = depth_map[segment_mask]
-            valid_depths = segment_depths[segment_depths > 0]
+            segment_depths = dented_depth_map[segment_mask]
+            valid_depths = segment_depths[(segment_depths > 0) & np.isfinite(segment_depths)]
             avg_depth_m = np.mean(valid_depths) if len(valid_depths) > 0 else 0.0
             
-            # Get depth difference values for this segment
-            segment_depth_diffs = depth_diff[segment_mask]
-            valid_diffs = segment_depth_diffs[np.isfinite(segment_depth_diffs) & (segment_depth_diffs > 0)]
-            max_depth_diff_m = np.max(valid_diffs) if len(valid_diffs) > 0 else 0.0
-            max_depth_diff_mm = max_depth_diff_m * 1000.0
+            # ====================================================================
+            # CALCULATE THREE TYPES OF DEPTH DIFFERENCES FOR THIS SEGMENT:
+            # ====================================================================
+            
+            # 1. Original vs Dented depth difference (direct comparison)
+            max_depth_diff_original_vs_dented_m = 0.0
+            max_depth_diff_original_vs_dented_mm = 0.0
+            if depth_diff_original_vs_dented is not None:
+                segment_depth_diffs_original = depth_diff_original_vs_dented[segment_mask]
+                valid_diffs_original = segment_depth_diffs_original[
+                    np.isfinite(segment_depth_diffs_original) & (segment_depth_diffs_original > 0)
+                ]
+                if len(valid_diffs_original) > 0:
+                    max_depth_diff_original_vs_dented_m = float(np.max(valid_diffs_original))
+                    max_depth_diff_original_vs_dented_mm = max_depth_diff_original_vs_dented_m * 1000.0
+            
+            # 2. Depth difference vs Median Panel Depth (raw and filtered)
+            segment_depth_diffs_median = depth_diff_median[segment_mask]
+            valid_diffs_median = segment_depth_diffs_median[
+                np.isfinite(segment_depth_diffs_median) & (segment_depth_diffs_median > 0)
+            ]
+            
+            max_depth_diff_vs_median_panel_m_raw = 0.0
+            max_depth_diff_vs_median_panel_mm_raw = 0.0
+            max_depth_diff_vs_median_panel_m = 0.0
+            max_depth_diff_vs_median_panel_mm = 0.0
+            
+            if len(valid_diffs_median) > 0:
+                # Raw maximum
+                max_depth_diff_vs_median_panel_m_raw = float(np.max(valid_diffs_median))
+                max_depth_diff_vs_median_panel_mm_raw = max_depth_diff_vs_median_panel_m_raw * 1000.0
+                
+                # Filtered maximum (using percentile clipping to remove outliers)
+                filtered_diffs = self._filter_dent_depths_outliers(valid_diffs_median, method='percentile', percentile=99.0)
+                if len(filtered_diffs) > 0:
+                    max_depth_diff_vs_median_panel_m = float(np.max(filtered_diffs))
+                    max_depth_diff_vs_median_panel_mm = max_depth_diff_vs_median_panel_m * 1000.0
+                    # If filtered exceeds 200mm, use raw value
+                    if max_depth_diff_vs_median_panel_mm > 200.0:
+                        max_depth_diff_vs_median_panel_m = max_depth_diff_vs_median_panel_m_raw
+                        max_depth_diff_vs_median_panel_mm = max_depth_diff_vs_median_panel_mm_raw
+                else:
+                    max_depth_diff_vs_median_panel_m = max_depth_diff_vs_median_panel_m_raw
+                    max_depth_diff_vs_median_panel_mm = max_depth_diff_vs_median_panel_mm_raw
+            
+            # 3. Depth difference vs Local Corrugation Median (dilation_radius pixels)
+            max_depth_diff_vs_local_corrugation_m = 0.0
+            max_depth_diff_vs_local_corrugation_mm = 0.0
+            local_corrugation_median_m = 0.0
+            
+            if panel_mask is not None:
+                # Calculate median depth of local corrugation wall around this segment
+                local_corrugation_median = self._calculate_local_corrugation_median(
+                    segment_mask, dented_depth_map, panel_mask, dent_mask, dilation_radius=dilation_radius
+                )
+                
+                if local_corrugation_median > 0:
+                    local_corrugation_median_m = local_corrugation_median
+                    # Calculate depth difference relative to local corrugation median
+                    depth_diffs_from_local = np.abs(valid_depths - local_corrugation_median)
+                    if len(depth_diffs_from_local) > 0:
+                        max_depth_diff_vs_local_corrugation_m = float(np.max(depth_diffs_from_local))
+                        max_depth_diff_vs_local_corrugation_mm = max_depth_diff_vs_local_corrugation_m * 1000.0
             
             # Determine dent direction for this segment
             segment_directions = direction_map[segment_mask]
@@ -1625,6 +2051,27 @@ class DentComparisonRenderer:
                     direction = 'unknown'
                     direction_ratio = 0.5
             
+            # Calculate local plane-fitting depth using Geometric Continuity (Stripes Method)
+            # Uses Directional RANSAC to extend healthy stripes across the dent
+            # Robust to: Warping, Bowing, Tilting, and Corrugation shape
+            # Ensure depth map is in meters (it should already be)
+            max_depth_local_plane_m = self._calculate_max_dent_depth_stripes(
+                dented_depth_map, segment_mask.astype(np.uint8)
+            )
+            max_depth_local_plane_mm = max_depth_local_plane_m * 1000.0
+            
+            # For compatibility, set local_plane_depth_m to segment average
+            # (The stripes method doesn't return this, but we keep it for backward compatibility)
+            local_plane_depth_m = avg_depth_m
+            
+            # Wave location is determined by the stripes method internally
+            # Set to a generic value since the new method doesn't classify explicitly
+            wave_location = "STRIPES_METHOD"
+            wave_location_description = "Geometric Continuity (Stripes Method - Directional RANSAC)"
+            depth_diff_from_global_m = local_plane_depth_m - global_median_depth
+            depth_diff_from_global_mm = depth_diff_from_global_m * 1000.0
+            
+            # Build segment info dictionary with all depth measurements
             segment_info = {
                 'segment_id': int(label_id),
                 'area_cm2': float(area_cm2),
@@ -1634,19 +2081,454 @@ class DentComparisonRenderer:
                 'centroid': [float(centroid_x), float(centroid_y)],
                 'bbox': [int(x), int(y), int(width), int(height)],
                 'avg_depth_m': float(avg_depth_m),
-                'max_depth_diff_m': float(max_depth_diff_m),
-                'max_depth_diff_mm': float(max_depth_diff_mm),
                 'direction': direction,
-                'direction_ratio': float(direction_ratio)
+                'direction_ratio': float(direction_ratio),
+                # Depth measurements
+                'max_depth_diff_original_vs_dented_m': float(max_depth_diff_original_vs_dented_m),
+                'max_depth_diff_original_vs_dented_mm': float(max_depth_diff_original_vs_dented_mm),
+                'max_depth_diff_vs_median_panel_m_raw': float(max_depth_diff_vs_median_panel_m_raw),
+                'max_depth_diff_vs_median_panel_mm_raw': float(max_depth_diff_vs_median_panel_mm_raw),
+                'max_depth_diff_vs_median_panel_m': float(max_depth_diff_vs_median_panel_m),
+                'max_depth_diff_vs_median_panel_mm': float(max_depth_diff_vs_median_panel_mm),
+                'max_depth_diff_vs_local_corrugation_m': float(max_depth_diff_vs_local_corrugation_m),
+                'max_depth_diff_vs_local_corrugation_mm': float(max_depth_diff_vs_local_corrugation_mm),
+                'local_corrugation_median_m': float(local_corrugation_median_m),
+                'local_corrugation_dilation_radius_pixels': dilation_radius,
+                # Local plane-fitting depth (dominant surface method)
+                'max_depth_local_plane_m': float(max_depth_local_plane_m),
+                'max_depth_local_plane_mm': float(max_depth_local_plane_mm),
+                'local_plane_depth_m': float(local_plane_depth_m),
+                'local_plane_depth_mm': float(local_plane_depth_m * 1000.0),
+                # Wave classification (Single Rail vs Multi-Rail)
+                'wave_location': wave_location,
+                'wave_location_description': wave_location_description,
+                'global_median_depth_m': float(global_median_depth),
+                'global_median_depth_mm': float(global_median_depth * 1000.0),
+                'depth_diff_from_global_m': float(depth_diff_from_global_m),
+                'depth_diff_from_global_mm': float(depth_diff_from_global_mm),
+                # Legacy fields for backward compatibility
+                # Updated to use local plane-fitting depth (rim-based classification method)
+                'max_depth_diff_m': float(max_depth_local_plane_m),
+                'max_depth_diff_mm': float(max_depth_local_plane_mm)
             }
             
             segments.append(segment_info)
         
         return segments
     
+    def _calculate_global_median_depth(self, depth_map: np.ndarray, dent_mask: np.ndarray,
+                                      panel_mask: Optional[np.ndarray] = None) -> float:
+        """
+        Calculate global median depth of the entire wall (excluding dent pixels).
+        This represents the "middle line" of the corrugation pattern.
+        
+        Args:
+            depth_map: Depth map (H, W) in meters
+            dent_mask: Binary mask (H, W) where True/255 = dent pixels
+            panel_mask: Optional panel mask (H, W) where True/1.0 = panel region
+            
+        Returns:
+            Global median depth in meters
+        """
+        # Find all wall pixels (non-dent pixels with valid depth)
+        if panel_mask is not None:
+            wall_pixels_mask = (depth_map > 0) & (dent_mask == 0) & (panel_mask > 0) & np.isfinite(depth_map)
+        else:
+            wall_pixels_mask = (depth_map > 0) & (dent_mask == 0) & np.isfinite(depth_map)
+        
+        wall_pixels = depth_map[wall_pixels_mask]
+        
+        if len(wall_pixels) == 0:
+            return 0.0
+        
+        return float(np.median(wall_pixels))
+    
+    def _detect_corrugation_orientation(self, depth_map: np.ndarray) -> str:
+        """
+        --- A. Helper: Detect Wall Orientation ---
+        Determines if stripes run Vertical (Side Walls) or Horizontal (Roof).
+        
+        Logic: Uses Sobel gradients to find direction of highest change.
+        - Vertical Walls: Depth changes rapidly Left-to-Right (High dX), constant Up-Down (Low dY)
+        - Horizontal Roofs: Depth changes rapidly Up-Down (High dY), constant Left-Right (Low dX)
+        
+        Args:
+            depth_map: Depth map (H, W) in meters
+            
+        Returns:
+            "VERTICAL" for side walls, "HORIZONTAL" for roofs, "UNKNOWN" for flat/complex
+        """
+        # Sobel gradients to find direction of highest change
+        dx = cv2.Sobel(depth_map, cv2.CV_64F, 1, 0, ksize=5)
+        dy = cv2.Sobel(depth_map, cv2.CV_64F, 0, 1, ksize=5)
+        
+        # If Horizontal variance (dx) is higher, waves go Up-Down (Vertical)
+        if np.var(dx) > np.var(dy) * 1.2:
+            return "VERTICAL"
+        # If Vertical variance (dy) is higher, waves go Left-Right (Horizontal)
+        elif np.var(dy) > np.var(dx) * 1.2:
+            return "HORIZONTAL"
+        
+        return "UNKNOWN"
+    
+    def _calculate_max_dent_depth_stripes(self, depth_map: np.ndarray, mask_binary: np.ndarray) -> float:
+        """
+        --- B. Helper: Directional RANSAC (The "Stripes" Logic) ---
+        Measures depth by extending the "healthy stripes" across the dent.
+        Robust to: Warping, Bowing, Tilting, and Corrugation shape.
+        
+        This implements the Geometric Continuity approach (Stripes Method) which mimics
+        IICL inspection standards by following container rails directionally.
+        
+        Args:
+            depth_map: Depth map (H, W) in meters
+            mask_binary: Binary mask (H, W) where True/1.0 = dent pixels
+            
+        Returns:
+            Maximum dent depth in meters (95th percentile)
+        """
+        if np.sum(mask_binary) == 0:
+            return 0.0
+        
+        # 1. Orientation
+        orientation = self._detect_corrugation_orientation(depth_map)
+        
+        # 2. Process Each Dent Individually
+        num_labels, labels = cv2.connectedComponents((mask_binary > 0).astype(np.uint8))
+        max_severity_total = 0.0
+        H, W = depth_map.shape
+        
+        # Grid for RANSAC
+        yy, xx = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+
+        for i in range(1, num_labels):
+            dent_mask = (labels == i)
+            ys, xs = np.where(dent_mask)
+            if len(ys) == 0:
+                continue
+                
+            y_min, y_max = np.min(ys), np.max(ys)
+            x_min, x_max = np.min(xs), np.max(xs)
+            
+            # --- 3. EXTRACT THE STRIPE (Scanning) ---
+            # Look "Up/Down" or "Left/Right" to find the original rail.
+            scan_margin = 150  # Look far to find healthy metal
+            
+            if orientation == "VERTICAL":  # Side Walls
+                y_scan_min = max(0, y_min - scan_margin)
+                y_scan_max = min(H, y_max + scan_margin)
+                # CRITICAL: Keep width strict (don't look left/right at other rails)
+                x_scan_min, x_scan_max = x_min, x_max
+                
+            elif orientation == "HORIZONTAL":  # Roofs
+                y_scan_min, y_scan_max = y_min, y_max
+                # CRITICAL: Keep height strict
+                x_scan_min = max(0, x_min - scan_margin)
+                x_scan_max = min(W, x_max + scan_margin)
+                
+            else:  # Unknown (Box Search fallback)
+                y_scan_min = max(0, y_min - 50)
+                y_scan_max = min(H, y_max + 50)
+                x_scan_min = max(0, x_min - 50)
+                x_scan_max = min(W, x_max + 50)
+
+            strip_depth = depth_map[y_scan_min:y_scan_max, x_scan_min:x_scan_max]
+            strip_mask = mask_binary[y_scan_min:y_scan_max, x_scan_min:x_scan_max]
+            
+            # Identify Healthy Neighbors in this stripe
+            neighbor_mask = (strip_depth > 0) & (strip_mask == 0) & np.isfinite(strip_depth)
+            if np.sum(neighbor_mask) < 50:
+                continue
+
+            # --- 4. SURFACE LOGIC (The Bowing Fix) ---
+            neighbor_depths = strip_depth[neighbor_mask]
+            
+            # Coordinate Grids for this strip
+            h_c, w_c = strip_depth.shape
+            yy_c, xx_c = np.meshgrid(np.arange(h_c), np.arange(w_c), indexing='ij')
+            X_candidates = np.stack([xx_c[neighbor_mask], yy_c[neighbor_mask]], axis=1)
+            y_candidates = neighbor_depths
+
+            # Check Variance: Does this stripe contain both Hills and Valleys?
+            # Corrugation depth is ~36mm. If range > 15mm, we likely have mixed surfaces.
+            depth_range = np.percentile(neighbor_depths, 95) - np.percentile(neighbor_depths, 5)
+            
+            if depth_range > 0.015:
+                # Case: Multi-Wave Stripe.
+                # ACTION: Filter for "Peaks" (Closer points) to bridge the gap.
+                # This works even if wall is bowed, because it's relative to local strip.
+                threshold = np.percentile(neighbor_depths, 50)
+                is_peak = neighbor_depths <= threshold
+                
+                X_train = X_candidates[is_peak]
+                y_train = y_candidates[is_peak]
+            else:
+                # Case: Single Rail (Pure Hill or Pure Valley).
+                # ACTION: Use everything.
+                X_train = X_candidates
+                y_train = y_candidates
+
+            # --- 5. CREATE GHOST STRIPES (RANSAC Fit) ---
+            try:
+                reg = RANSACRegressor(random_state=42, residual_threshold=0.005)
+                reg.fit(X_train, y_train)
+                
+                # --- 6. MEASURE PERPENDICULAR DROP ---
+                dent_pixels_mask = (strip_mask > 0)
+                X_dent = np.stack([xx_c[dent_pixels_mask], yy_c[dent_pixels_mask]], axis=1)
+                actual_depths = strip_depth[dent_pixels_mask]
+                
+                # Predict "Should Be" Depth
+                ideal_depths = reg.predict(X_dent)
+                
+                # Calculate Difference
+                diffs = np.abs(actual_depths - ideal_depths)
+                valid_diffs = diffs[np.isfinite(diffs)]
+                
+                if len(valid_diffs) == 0:
+                    continue
+                
+                # Robust Max (95th Percentile)
+                sev = np.percentile(valid_diffs, 95)
+                if sev > max_severity_total:
+                    max_severity_total = sev
+            except Exception as e:
+                logger.debug(f"RANSAC fitting failed for dent segment {i}: {e}")
+                continue
+
+        return float(max_severity_total)
+    
+    def _calculate_max_depth_diff_m(self, shot_name: Optional[str],
+                                    max_depth_diff_original_vs_dented_m: float,
+                                    max_depth_diff_vs_median_panel_m: float,
+                                    max_depth_diff_vs_local_corrugation_m: float) -> float:
+        """
+        Calculate max_depth_diff_m based on shot_name.
+        For back panels, use the minimum of the three depth measurements.
+        For all other shots (side walls, roof, doors, etc.), use the smaller of:
+        max_depth_diff_original_vs_dented_m and max_depth_diff_vs_median_panel_m.
+        
+        Args:
+            shot_name: Name of the shot (e.g., "internal_back_wall")
+            max_depth_diff_original_vs_dented_m: Depth difference vs original dented (meters)
+            max_depth_diff_vs_median_panel_m: Depth difference vs median panel (meters)
+            max_depth_diff_vs_local_corrugation_m: Depth difference vs local corrugation (meters)
+            
+        Returns:
+            Maximum depth difference in meters
+        """
+        # Check if this is a back panel shot
+        if shot_name and 'back' in shot_name.lower():
+            # For back panels, use the minimum of the three values
+            values = [
+                max_depth_diff_original_vs_dented_m,
+                max_depth_diff_vs_median_panel_m,
+                max_depth_diff_vs_local_corrugation_m
+            ]
+            # Filter out zero values (which indicate measurement wasn't available)
+            valid_values = [v for v in values if v > 0]
+            if valid_values:
+                return float(min(valid_values))
+            # Fallback to median panel if no valid values
+            return float(max_depth_diff_vs_median_panel_m)
+        else:
+            # For non-back panels, use the smaller of original_vs_dented and vs_median_panel
+            values = [
+                max_depth_diff_original_vs_dented_m,
+                max_depth_diff_vs_median_panel_m
+            ]
+            # Filter out zero values (which indicate measurement wasn't available)
+            valid_values = [v for v in values if v > 0]
+            if valid_values:
+                return float(min(valid_values))
+            # Fallback to median panel if no valid values
+            return float(max_depth_diff_vs_median_panel_m)
+    
+    def _calculate_local_corrugation_median(self, segment_mask: np.ndarray, depth_map: np.ndarray,
+                                            panel_mask: Optional[np.ndarray], dent_mask: np.ndarray,
+                                            dilation_radius: int = 30) -> float:
+        """
+        Calculate median depth of the corrugation wall region around a dent segment.
+        
+        Args:
+            segment_mask: Binary mask (H, W) for a single dent segment (True = segment pixels)
+            depth_map: Depth map (H, W) in meters
+            panel_mask: Panel mask (H, W) where True/1.0 = panel region
+            dent_mask: Full dent mask (H, W) to exclude all dent pixels
+            dilation_radius: Radius in pixels to search around segment for corrugation region
+            
+        Returns:
+            Median depth of local corrugation wall in meters
+        """
+        h, w = segment_mask.shape
+        
+        # Create dilated region around segment to find nearby corrugation wall
+        segment_uint8 = segment_mask.astype(np.uint8) * 255
+        kernel_size = dilation_radius * 2 + 1
+        dilation_kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        dilated_region = cv2.dilate(segment_uint8, dilation_kernel, iterations=1)
+        
+        # Find panel pixels in dilated region (excluding dent pixels)
+        if panel_mask is not None:
+            # Panel region in dilated area, excluding dent pixels
+            local_panel_region = (dilated_region > 0) & (panel_mask > 0) & (dent_mask == 0)
+        else:
+            # Use entire dilated area excluding dent pixels
+            local_panel_region = (dilated_region > 0) & (dent_mask == 0)
+        
+        # Get valid depths from local corrugation wall region
+        local_panel_depths = depth_map[local_panel_region & (depth_map > 0) & np.isfinite(depth_map)]
+        
+        if len(local_panel_depths) == 0:
+            # Fallback: use global panel median if no local region found
+            if panel_mask is not None:
+                panel_region = (panel_mask > 0) & (dent_mask == 0)
+            else:
+                panel_region = (dent_mask == 0)
+            fallback_depths = depth_map[panel_region & (depth_map > 0) & np.isfinite(depth_map)]
+            if len(fallback_depths) > 0:
+                return float(np.median(fallback_depths))
+            return 0.0
+        
+        return float(np.median(local_panel_depths))
+    
+    def _filter_segments_by_depth(self, dent_mask: np.ndarray, depth_map: np.ndarray,
+                                  depth_diff: np.ndarray, direction_map: np.ndarray,
+                                  panel_mask: Optional[np.ndarray] = None,
+                                  min_depth_mm: float = 10.0,
+                                  shot_name: Optional[str] = None) -> Tuple[np.ndarray, list]:
+        """
+        Filter dent segments by minimum depth threshold.
+        Compares each segment to the median depth of its local corrugation wall (not entire panel).
+        
+        Args:
+            dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
+            depth_map: Depth map (H, W) in meters (dented depth)
+            depth_diff: Depth difference map (H, W) in meters (relative to median panel depth)
+            direction_map: Direction map (H, W) where 1.0 = inward, -1.0 = outward, 0.0 = no dent
+            panel_mask: Panel mask (H, W) where True/1.0 = panel region
+            min_depth_mm: Minimum depth threshold in mm (default: 10.0 mm)
+            
+        Returns:
+            Tuple of (filtered_mask, filtered_segments_info):
+            - filtered_mask: Binary mask with only segments above depth threshold
+            - filtered_segments_info: List of segment information for kept segments
+        """
+        # Find connected components (segments)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            dent_mask, connectivity=8
+        )
+        
+        filtered_segments = []
+        
+        # Process each segment individually
+        for label_id in range(1, num_labels):  # Skip label 0 (background)
+            # Create mask for this segment
+            segment_mask = (labels == label_id)
+            
+            # Calculate median depth of local corrugation wall around this segment
+            local_corrugation_median = self._calculate_local_corrugation_median(
+                segment_mask, depth_map, panel_mask, dent_mask, dilation_radius=30
+            )
+            
+            if local_corrugation_median <= 0:
+                # Skip if no valid corrugation region found
+                continue
+            
+            # Get depth values for this segment
+            segment_depths = depth_map[segment_mask & (depth_map > 0) & np.isfinite(depth_map)]
+            
+            if len(segment_depths) == 0:
+                continue
+            
+            # Calculate depth difference relative to local corrugation median
+            # Use maximum depth difference in the segment
+            depth_diffs_from_local = np.abs(segment_depths - local_corrugation_median)
+            max_depth_diff_m = np.max(depth_diffs_from_local)
+            max_depth_diff_mm = max_depth_diff_m * 1000.0
+            
+            # Filter: keep only segments with depth >= min_depth_mm relative to local corrugation
+            if max_depth_diff_mm >= min_depth_mm:
+                # Get segment info using existing analysis function
+                # Create single-segment mask for analysis
+                single_segment_mask = (segment_mask.astype(np.uint8) * 255)
+                segment_info_list = self._analyze_dent_segments(
+                    single_segment_mask, depth_map, depth_diff, direction_map,
+                    shot_name=shot_name
+                )
+                if len(segment_info_list) > 0:
+                    # Get segment info (should be only one segment)
+                    segment_info = segment_info_list[0].copy()
+                    # Update segment_id to match original labels
+                    segment_info['segment_id'] = label_id
+                    # Update with local corrugation-based depth measurement
+                    segment_info['max_depth_diff_m'] = max_depth_diff_m
+                    segment_info['max_depth_diff_mm'] = max_depth_diff_mm
+                    segment_info['local_corrugation_median_m'] = local_corrugation_median
+                    filtered_segments.append(segment_info)
+        
+        # Create new mask with only filtered segments
+        filtered_mask = np.zeros_like(dent_mask)
+        
+        if len(filtered_segments) > 0:
+            # Keep only segments that passed the depth filter
+            for seg in filtered_segments:
+                segment_id = seg['segment_id']
+                if segment_id < num_labels:
+                    filtered_mask[labels == segment_id] = 255
+        
+        return filtered_mask, filtered_segments
+    
+    def _apply_morphology_operations(self, binary_mask: np.ndarray, valid_mask: np.ndarray,
+                                     morphology_opening_size: int = 9,
+                                     morphology_closing_size: int = 11,
+                                     min_dent_area: int = 200) -> np.ndarray:
+        """
+        Apply morphology operations to a binary mask.
+        
+        Args:
+            binary_mask: Input binary mask (uint8), with dent pixels = 255, background = 0
+            valid_mask: Boolean mask indicating valid pixels
+            morphology_opening_size: Kernel size for morphological opening
+            morphology_closing_size: Kernel size for morphological closing
+            min_dent_area: Minimum area for filtering thin components
+            
+        Returns:
+            Binary mask after morphology operations
+        """
+        result_mask = binary_mask.copy()
+        
+        # Apply morphological opening (erosion followed by dilation) to remove noise
+        if morphology_opening_size > 0:
+            opening_size = morphology_opening_size
+            if opening_size % 2 == 0:
+                opening_size += 1
+            opening_kernel = np.ones((opening_size, opening_size), np.uint8)
+            result_mask = cv2.morphologyEx(result_mask, cv2.MORPH_OPEN, opening_kernel)
+        
+        # Apply morphological closing (dilation followed by erosion) to fill gaps
+        if morphology_closing_size > 0:
+            closing_size = morphology_closing_size
+            if closing_size % 2 == 0:
+                closing_size += 1
+            closing_kernel = np.ones((closing_size, closing_size), np.uint8)
+            result_mask = cv2.morphologyEx(result_mask, cv2.MORPH_CLOSE, closing_kernel)
+        
+        # Post-morphology aggressive fill
+        result_mask = self._aggressive_internal_fill(result_mask, valid_mask)
+        
+        # Fill black holes inside white dented regions
+        result_mask = self._fill_holes(result_mask)
+        
+        # Remove small and thin false-positive regions
+        result_mask = self._filter_thin_components(result_mask, min_area=min_dent_area)
+        
+        return result_mask
+    
     def _filter_segments_by_area(self, dent_mask: np.ndarray, depth_map: np.ndarray,
                                  depth_diff: np.ndarray, direction_map: np.ndarray,
-                                 min_area_cm2: float = 1.0) -> Tuple[np.ndarray, list]:
+                                 min_area_cm2: float = 1.0,
+                                 shot_name: Optional[str] = None) -> Tuple[np.ndarray, list]:
         """
         Filter dent segments by minimum area threshold.
         
@@ -1663,7 +2545,8 @@ class DentComparisonRenderer:
             - filtered_segments_info: List of segment information for kept segments
         """
         # Analyze all segments
-        all_segments = self._analyze_dent_segments(dent_mask, depth_map, depth_diff, direction_map)
+        all_segments = self._analyze_dent_segments(dent_mask, depth_map, depth_diff, direction_map,
+                                                   shot_name=shot_name)
         
         # Filter segments by area
         filtered_segments = [seg for seg in all_segments if seg['area_cm2'] >= min_area_cm2]
@@ -1831,23 +2714,90 @@ class DentComparisonRenderer:
         
         return float(max_depth_m)
     
+    def _calculate_plane_depth_map(self, depth_map: np.ndarray, plane_coefficients: np.ndarray) -> np.ndarray:
+        """
+        Calculate plane depth map from RANSAC plane coefficients.
+        
+        Args:
+            depth_map: Depth map (H, W) in meters (used for shape and valid mask)
+            plane_coefficients: [a, b, -1, c] where z = ax + by + c in camera space
+            
+        Returns:
+            Plane depth map (H, W) in meters
+        """
+        height, width = depth_map.shape
+        a, b, _, c = plane_coefficients
+        
+        # Get camera intrinsics
+        if height == self.image_size and width == self.image_size:
+            focal_length = self.focal_length
+            cx, cy = self.cx, self.cy
+        else:
+            fov_y_rad = np.deg2rad(self.camera_fov)
+            focal_length = (height / 2.0) / np.tan(fov_y_rad / 2.0)
+            cx, cy = width / 2.0, height / 2.0
+        
+        # Create pixel coordinates
+        u, v = np.meshgrid(np.arange(width), np.arange(height))
+        
+        # Convert to normalized camera coordinates
+        x_norm = (u - cx) / focal_length
+        y_norm = (v - cy) / focal_length
+        
+        # Calculate plane depth: z_plane = c / (1 - a*x_norm - b*y_norm)
+        # This solves z = a*x_norm*z + b*y_norm*z + c for z
+        denominator = 1.0 - a * x_norm - b * y_norm
+        # Avoid division by zero and handle near-zero denominators
+        denominator = np.where(np.abs(denominator) < 1e-6, np.sign(denominator) * 1e-6, denominator)
+        plane_depth = c / denominator
+        
+        # Clamp plane depth to reasonable values (within depth map range)
+        valid_mask = (depth_map > 0) & np.isfinite(depth_map)
+        if np.any(valid_mask):
+            min_depth = np.min(depth_map[valid_mask])
+            max_depth = np.max(depth_map[valid_mask])
+            # Allow some margin beyond the depth range
+            margin = (max_depth - min_depth) * 0.1
+            plane_depth = np.clip(plane_depth, min_depth - margin, max_depth + margin)
+        
+        # Set invalid depths to 0 (where original depth map is invalid)
+        plane_depth[~valid_mask] = 0.0
+        
+        # Filter out unrealistic depths (negative or infinite)
+        plane_depth[plane_depth <= 0] = 0.0
+        plane_depth[~np.isfinite(plane_depth)] = 0.0
+        
+        return plane_depth
+    
     def _calculate_median_panel_depth(self, depth_map: np.ndarray, dent_mask: np.ndarray, 
-                                     panel_mask: Optional[np.ndarray] = None) -> float:
+                                     panel_mask: Optional[np.ndarray] = None,
+                                     plane_coefficients: Optional[np.ndarray] = None) -> float:
         """
         Calculate median depth of the panel region, excluding dent areas.
         
-        This represents the "normal" panel surface depth, which is used as reference
-        for measuring dent depth.
+        If plane_coefficients are provided, uses RANSAC-fitted plane depth instead of raw depth.
+        This eliminates perspective distortion effects.
         
         Args:
             depth_map: Depth map (H, W) in meters
             dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
             panel_mask: Optional panel mask (H, W) where True/1.0 = panel region.
                        If None, uses entire image.
+            plane_coefficients: Optional RANSAC plane coefficients [a, b, -1, c]. If provided,
+                              uses plane depth instead of raw depth.
             
         Returns:
             Median panel depth in meters
         """
+        # If plane coefficients are provided, use plane depth instead of raw depth
+        if plane_coefficients is not None:
+            plane_depth_map = self._calculate_plane_depth_map(depth_map, plane_coefficients)
+            depth_to_use = plane_depth_map
+            logger.info("    Using RANSAC-fitted plane depth for median calculation (eliminates perspective distortion)")
+        else:
+            depth_to_use = depth_map
+            logger.info("    Using raw depth for median calculation (no plane coefficients provided)")
+        
         # Combine masks: panel region excluding dent areas
         if panel_mask is not None:
             # Panel region (excluding dents)
@@ -1857,14 +2807,14 @@ class DentComparisonRenderer:
             panel_region = (dent_mask == 0)
         
         # Get valid panel depths (non-zero, finite, excluding dents)
-        panel_depths = depth_map[panel_region & (depth_map > 0) & np.isfinite(depth_map)]
+        panel_depths = depth_to_use[panel_region & (depth_to_use > 0) & np.isfinite(depth_to_use)]
         
         if len(panel_depths) == 0:
             # Fallback: use median of all valid depths if no panel region found
-            valid_depths = depth_map[(depth_map > 0) & np.isfinite(depth_map) & (dent_mask == 0)]
+            valid_depths = depth_to_use[(depth_to_use > 0) & np.isfinite(depth_to_use) & (dent_mask == 0)]
             if len(valid_depths) == 0:
                 logger.warning("No valid panel depths found for median calculation, using mean of all depths")
-                valid_depths = depth_map[(depth_map > 0) & np.isfinite(depth_map)]
+                valid_depths = depth_to_use[(depth_to_use > 0) & np.isfinite(depth_to_use)]
                 if len(valid_depths) == 0:
                     return 0.0
             return float(np.median(valid_depths))
@@ -1872,7 +2822,9 @@ class DentComparisonRenderer:
         return float(np.median(panel_depths))
     
     def _calculate_depth_diff_from_median(self, depth_map: np.ndarray, dent_mask: np.ndarray,
-                                          panel_mask: Optional[np.ndarray] = None) -> np.ndarray:
+                                          panel_mask: Optional[np.ndarray] = None,
+                                          plane_coefficients: Optional[np.ndarray] = None,
+                                          original_depth_map: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Calculate depth difference map relative to median panel depth.
         
@@ -1880,14 +2832,27 @@ class DentComparisonRenderer:
             depth_map: Depth map (H, W) in meters (dented depth)
             dent_mask: Binary mask (H, W) where WHITE (255) = dented areas
             panel_mask: Optional panel mask (H, W) where True/1.0 = panel region
+            plane_coefficients: Optional RANSAC plane coefficients [a, b, -1, c]. If provided,
+                              uses plane depth for median calculation.
+            original_depth_map: Optional original depth map (H, W) in meters. If provided,
+                              calculates median from original panel instead of dented panel.
+                              This gives accurate dent depth relative to original panel median.
             
         Returns:
             Depth difference map (H, W) in meters, where values represent
             deviation from median panel depth
         """
-        median_depth = self._calculate_median_panel_depth(depth_map, dent_mask, panel_mask)
+        # Calculate median from original depth map if provided, otherwise from dented depth map
+        if original_depth_map is not None:
+            # Use original depth map to calculate median (excludes any dents)
+            # Use empty mask for original since we want to exclude dents from median calculation
+            empty_mask = np.zeros_like(dent_mask, dtype=np.uint8)
+            median_depth = self._calculate_median_panel_depth(original_depth_map, empty_mask, panel_mask, plane_coefficients)
+        else:
+            # Fallback to original behavior: calculate median from dented depth map
+            median_depth = self._calculate_median_panel_depth(depth_map, dent_mask, panel_mask, plane_coefficients)
         
-        # Calculate absolute depth difference from median
+        # Calculate absolute depth difference from median (using dented depth map)
         depth_diff = np.abs(depth_map - median_depth)
         
         # Set invalid depths to 0
